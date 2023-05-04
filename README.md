@@ -20,6 +20,16 @@ python manage.py runserver
 
 This command will run the Django development server locally. You can then visit `http://localhost:8000/admin` in your browser to use the centralized wallet.
 
+
+## Features
+
+`django_central_wallet` currently includes the following features (in progress):
+
+- [ ] Generate Ethereum addresses for users.
+- [ ] Support user deposits, including ERC20 tokens.
+- [ ] Support user withdrawals, including ERC20 tokens.
+
+
 ## License
 
 [MIT License](LICENSE)
