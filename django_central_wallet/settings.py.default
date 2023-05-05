@@ -40,7 +40,8 @@ DEFAULT_APPS = [
 ]
 
 LOCAL_APPS = [
-    "accounts",
+    "account",
+    "blockchain",
 ]
 
 THIRDPARTY_APPS = [
