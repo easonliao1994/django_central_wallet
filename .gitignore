@@ -281,4 +281,4 @@ cython_debug/
 
 # End of https://www.toptal.com/developers/gitignore/api/visualstudiocode,django,python
 # others
-foururbabe/settings.py
+django_central_wallet/settings.py
