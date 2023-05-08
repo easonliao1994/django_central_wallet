@@ -5,3 +5,4 @@ pyqrcode==1.2.1
 requests==2.28.1
 web3==5.30.0
 bit==0.8.0
+python-dotenv==1.0.0
