@@ -29,6 +29,9 @@ This command will run the Django development server locally. You can then visit 
 - [ ] Support user deposits, including ERC20 tokens.
 - [ ] Support user withdrawals, including ERC20 tokens.
 
+## Contributing
+
+Contributions to this project are welcome! To get started, fork the repository and create a new branch for your feature or bug fix. Once you've made your changes, submit a pull request for review.
 
 ## License
 
