@@ -20,6 +20,15 @@ class CryptoAddressAdmin(admin.ModelAdmin):
     readonly_fields = list_display
     fields = list_display
 
+    @admin.display(description='Generate Balance')
+    def generate_balance(modeladmin, request, queryset):
+        coin_infos = CoinInfo.objects.filter(blockchain__isnull=False, coin__isnull=False)
+        for address in queryset:
+            for coin_info in coin_infos:
+                CoinInfoBalance.objects.get_or_create(crypto_address=address, coin_info=coin_info)
+    
+    actions = [generate_balance]
+
 
 class BlockchainAdmin(admin.ModelAdmin):
     list_display = ('name', 'chain_id', 'get_symbol', 'confirm_times', 'last_block', 'last_sync_time', 'is_auto_sync')
@@ -53,5 +62,6 @@ class BlockchainAdmin(admin.ModelAdmin):
 # Register your models here.
 admin.site.register(Coin)
 admin.site.register(CoinInfo)
+admin.site.register(CoinInfoBalance)
 admin.site.register(Blockchain, BlockchainAdmin)
 admin.site.register(CryptoAddress, CryptoAddressAdmin)
