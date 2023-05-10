@@ -113,3 +113,22 @@ class CoinInfoBalance(models.Model):
     @property
     def amount_in_server(self) -> str:
         return get_blockchain_real_amount(self.coin_info, self.amount)
+
+class TransactionLog(models.Model):
+    tx_id = models.CharField(max_length=256, db_index=True)
+    blockchain = models.ForeignKey(Blockchain, on_delete=models.CASCADE, null=True, blank=True)
+    coin_info = models.ForeignKey(CoinInfo, on_delete=models.CASCADE, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    sender_address = models.CharField(max_length=256, null=True, blank=True)
+    recipient_address = models.CharField(max_length=256, null=True, blank=True)
+    amount = models.DecimalField(default=0, max_digits=30, decimal_places=0)
+    
+    status = models.CharField(max_length=100)
+    block_number = models.PositiveIntegerField()
+    nonce = models.PositiveIntegerField()
+
+    def __str__(self):
+        if self.blockchain is not None and self.coin_info is not None:
+            return f'[{self.blockchain.name} - {self.coin_info.coin.symbol}] - {self.tx_id}'
+        return f'{self.tx_id}'
+    

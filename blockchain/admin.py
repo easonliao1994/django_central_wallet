@@ -63,5 +63,6 @@ class BlockchainAdmin(admin.ModelAdmin):
 admin.site.register(Coin)
 admin.site.register(CoinInfo)
 admin.site.register(CoinInfoBalance)
+admin.site.register(TransactionLog)
 admin.site.register(Blockchain, BlockchainAdmin)
 admin.site.register(CryptoAddress, CryptoAddressAdmin)
