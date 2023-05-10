@@ -1,8 +1,8 @@
 from django.db import models
 from django_central_wallet.utils.global_method import *
-from django.contrib.auth.models import User
 import io
 import pyqrcode as pyqrcode
+from django.conf import settings
 
 class Coin(models.Model):
     symbol = models.CharField(max_length=32, default='ETH', help_text="Same with blockchain symbol.")
@@ -72,7 +72,7 @@ class CoinInfo(models.Model):
         return 10**self.decimal
 
 class CryptoAddress(models.Model):
-    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='crypto_addresses')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='crypto_addresses')
     address = models.CharField(max_length=256, unique=True, help_text='Cryptocurrency wallet address.')
     private_key = models.CharField(max_length=256, help_text='Cryptocurrency wallet private key.')
 
