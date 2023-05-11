@@ -2,6 +2,13 @@ from web3 import Web3, HTTPProvider
 import json
 from django_central_wallet.utils.custom_exception_handler import *
 from decimal import Decimal
+import re
+from django_central_wallet.utils.custom_exception_handler import *
+# 驗證信箱格式
+def isEmailFormatValid(email):
+    regex = re.compile(r'([A-Za-z0-9]+[.-_])*[A-Za-z0-9]+@[A-Za-z0-9-]+(\.[A-Z|a-z]{2,})+')
+    if re.fullmatch(regex, email) is None:
+        raise EmailFormatException
 
 # Web3 相關
 def get_web3(blockchain, middleware_inject=False):

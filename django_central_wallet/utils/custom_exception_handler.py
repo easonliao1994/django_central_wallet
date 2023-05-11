@@ -30,3 +30,10 @@ class UnknowErrorException(CustomException):
 
 class TryAgainLaterException(CustomException):
     default_detail = ErrorDetail('try_again_later', 'try_again_later')
+
+
+class EmailFormatException(CustomException):
+    default_detail = ErrorDetail('email_format_error', 'email_format_error')
+
+class UserAlreadyExistsException(CustomException):
+    default_detail = ErrorDetail('user_already_exists', 'user_already_exists')
