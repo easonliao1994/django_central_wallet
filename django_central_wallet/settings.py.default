@@ -135,7 +135,7 @@ REST_FRAMEWORK = {
 }
 
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-DEFAULT_FROM_EMAIL = 'noreply@smartlearn'
+DEFAULT_FROM_EMAIL = 'noreply@demo.com'
 
 
 # Internationalization
