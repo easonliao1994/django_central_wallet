@@ -33,6 +33,11 @@ class UserViewSet(AutoPrefetchViewSetMixin, viewsets.ModelViewSet):
         if self.action == 'destroy':
             return {permissions.IsAuthenticated(), permissions.IsAdminUser()}
         return super().get_permissions()
+    
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['request'] = self.request  # 将请求对象添加到上下文中
+        return context
 
 
 def activate(request, uidb64: str, token: str):
@@ -45,9 +50,7 @@ def activate(request, uidb64: str, token: str):
         user = None
 
     if user is not None and EmailVerifyTokenGenerator().check_token(user, token):
-        token = user.profile.activate(verify_method='email')
-        return render(request, 'mail_verified.html', {
-            'token': token.key,
-        })
+        token = user.activate(verify_method='email')
+        return render(request, 'mail_verified.html')
     else:
         return render(request, 'account_not_activated.html')
