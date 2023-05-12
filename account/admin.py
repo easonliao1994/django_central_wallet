@@ -8,7 +8,7 @@ from .models import *
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
     inlines = [CryptoAddressInline]
-    list_display = ('id', 'email', 'is_active', 'date_joined', 'last_login')
+    list_display = ('id', 'email', 'is_active', 'is_verified', 'date_joined', 'last_login')
     search_fields = ['email']
     ordering = ('-id',)
 
