@@ -6,7 +6,7 @@ from django.contrib.auth.models import User
 from rest_framework import status
 from .models import *
 
-class InvitationAPITest(APITestCase):
+class UserAPITest(APITestCase):
     def setUp(self):
         self.user1 = User.objects.create_user('user1@test.com', 'Test123a')
         self.assertEqual(self.user1.is_verified, False)
