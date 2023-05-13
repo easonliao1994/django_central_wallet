@@ -50,7 +50,7 @@ def activate(request, uidb64: str, token: str):
         user = None
 
     if user is not None and EmailVerifyTokenGenerator().check_token(user, token):
-        token = user.activate(verify_method='email')
+        user.activate(verify_method='email')
         return render(request, 'mail_verified.html')
     else:
         return render(request, 'account_not_activated.html')
