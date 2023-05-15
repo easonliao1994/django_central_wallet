@@ -50,7 +50,7 @@ class BlockchainAdmin(admin.ModelAdmin):
     @admin.display(description='Update latest block number for selected blockchains')
     def update_latest_block_number(modeladmin, request, queryset):
         for b in queryset:
-            w3 = get_web3(b, True)
+            w3 = b.get_web3(True)
             if w3 is None:
                 continue
             confirm_latest_block_number = b.get_confirm_latest_block_number(w3)
