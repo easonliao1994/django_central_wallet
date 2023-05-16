@@ -39,10 +39,31 @@ class Blockchain(models.Model):
     
     def __str__(self):
         return f'{self.name}'
+    
+    def get_web3(self, middleware_inject=False):
+        w3 = None
+        rpc_urls = self.rpc_url.splitlines()
+        for rpc_url in rpc_urls:
+            try:
+                w3 = Web3(HTTPProvider(rpc_url)) 
+                if w3.isConnected():
+                    break
+                w3 = None
+            except Exception:
+                w3 = None
+                continue
+
+        if w3 is None or w3.isConnected() is False:
+            return None
+        
+        from web3.middleware import geth_poa_middleware
+        if middleware_inject:
+            w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+        return w3
 
     def get_confirm_latest_block_number(self, w3):
         if w3 is None:
-            return None
+            w3 = self.get_web3()
         try:
             current_latest_block_number = w3.eth.get_block_number()
             confirm_block_number = current_latest_block_number - self.confirm_times
