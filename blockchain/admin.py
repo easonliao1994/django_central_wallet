@@ -45,6 +45,8 @@ class BlockchainAdmin(admin.ModelAdmin):
         return actions
     
     def get_symbol(self, instance: CoinInfo):
+        if instance.coin is None:
+            return None
         return instance.coin.symbol
 
     @admin.display(description='Update latest block number for selected blockchains')
