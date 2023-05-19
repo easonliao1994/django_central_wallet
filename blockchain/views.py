@@ -8,16 +8,10 @@ from django.shortcuts import get_object_or_404
 
 # Create your views here.
 class BlockchainViewSet(AutoPrefetchViewSetMixin, viewsets.ModelViewSet):
-    queryset = get_user_model().objects.all()
+    queryset = Blockchain.objects.all()
     serializer_class = BlockchainSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = CustomPagination
-
-    def get_object(self):
-        pk = self.kwargs["pk"]
-        obj = get_object_or_404(Blockchain, id=pk)
-        self.check_object_permissions(self.request, obj)
-        return obj 
     
     def get_queryset(self):
         return super().get_queryset()

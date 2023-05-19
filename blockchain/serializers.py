@@ -10,7 +10,12 @@ class CoinSerializer(serializers.ModelSerializer):
 
 
 class BlockchainSerializer(serializers.ModelSerializer):
-    coin = CoinSerializer(read_only=True)
+    coin = serializers.SerializerMethodField()
+
+    def get_coin(self, obj):
+        if obj.coin is not None:
+            return CoinSerializer(obj.coin).data
+        return None
 
     class Meta:
         model = Blockchain
