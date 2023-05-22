@@ -9,7 +9,7 @@ class CustomPagination(pagination.PageNumberPagination):
     max_page_size = 50
     page_query_param = 'page'
 
-    def get_paginated_response(self, data, key, new_dict=None):
+    def get_paginated_response(self, data, key='results', new_dict=None):
         result = {'success': True,
                 'count': self.page.paginator.count,
                 'next': True if self.get_next_link() is not None else False,

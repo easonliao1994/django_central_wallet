@@ -16,11 +16,6 @@ class BlockchainViewSet(AutoPrefetchViewSetMixin, viewsets.ModelViewSet):
     def get_queryset(self):
         return super().get_queryset()
     
-    def get_serializer_context(self):
-        context = super().get_serializer_context()
-        context['request'] = self.request
-        return context
-
 
 class BlockchainDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = BlockchainSerializer
