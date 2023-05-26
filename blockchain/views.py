@@ -25,4 +25,4 @@ class BlockchainDetailView(generics.RetrieveUpdateDestroyAPIView):
         pk = self.kwargs["pk"]
         obj = get_object_or_404(Blockchain, id=pk)
         self.check_object_permissions(self.request, obj)
-        return obj 
+        return obj
