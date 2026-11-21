@@ -134,3 +134,81 @@ class TransactionLogAdmin(admin.ModelAdmin):
 
 admin.site.register(Blockchain, BlockchainAdmin)
 admin.site.register(CryptoAddress, CryptoAddressAdmin)
+
+
+@admin.register(HotWallet)
+class HotWalletAdmin(admin.ModelAdmin):
+    list_display = ('blockchain', 'address', 'next_nonce', 'created_at')
+    readonly_fields = ('address', 'next_nonce', 'created_at')
+    fields = ('blockchain', 'address', 'next_nonce', 'created_at')
+
+    def get_readonly_fields(self, request, obj=None):
+        return self.readonly_fields + (('blockchain',) if obj else ())
+
+    def save_model(self, request, obj, form, change):
+        if not change:
+            from .wallet import generate_keypair
+            address, private_key = generate_keypair()
+            obj.address = address
+            obj.set_private_key(private_key)
+        super().save_model(request, obj, form, change)
+
+
+@admin.register(Withdrawal)
+class WithdrawalAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'coin_info', 'get_amount', 'to_address', 'status', 'tx_id', 'created_at')
+    list_filter = ('status', 'coin_info__blockchain')
+    search_fields = ('user__email', 'to_address', 'tx_id')
+    raw_id_fields = ('user', 'crypto_address', 'transaction_log', 'reviewed_by')
+    readonly_fields = [f.name for f in Withdrawal._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    @admin.display(description='Amount')
+    def get_amount(self, obj):
+        return obj.amount_str
+
+    def _run(modeladmin, request, queryset, fn, label):
+        from .withdrawals import BroadcastError
+        done = 0
+        for w in queryset:
+            try:
+                done += int(bool(fn(w)))
+            except BroadcastError as e:
+                modeladmin.message_user(request, f'#{w.pk}: {e}', level=messages.ERROR)
+        modeladmin.message_user(request, f'{label}: {done} of {queryset.count()} withdrawal(s).')
+
+    @admin.display(description='Approve selected withdrawals')
+    def approve_selected(modeladmin, request, queryset):
+        from .withdrawals import approve
+        modeladmin._run(request, queryset, lambda w: approve(w, request.user), 'Approved')
+
+    @admin.display(description='Reject selected withdrawals (refund balance)')
+    def reject_selected(modeladmin, request, queryset):
+        from .withdrawals import reject
+        modeladmin._run(request, queryset, lambda w: reject(w, request.user), 'Rejected')
+
+    @admin.display(description='Broadcast selected approved withdrawals now')
+    def broadcast_selected(modeladmin, request, queryset):
+        from .withdrawals import broadcast
+        modeladmin._run(request, queryset, broadcast, 'Broadcast')
+
+    @admin.display(description='Rebroadcast selected stuck withdrawals (same nonce, higher gas)')
+    def rebroadcast_selected(modeladmin, request, queryset):
+        from .withdrawals import rebroadcast
+        modeladmin._run(request, queryset, rebroadcast, 'Rebroadcast')
+
+    @admin.display(description='Check confirmation status for the chains of selected withdrawals')
+    def check_selected(modeladmin, request, queryset):
+        from .withdrawals import BroadcastError, check_broadcast_withdrawals
+        for chain in Blockchain.objects.filter(coininfo__withdrawal__in=queryset).distinct():
+            try:
+                modeladmin.message_user(request, f'{chain}: {check_broadcast_withdrawals(chain)}')
+            except BroadcastError as e:
+                modeladmin.message_user(request, f'{chain}: {e}', level=messages.ERROR)
+
+    actions = [approve_selected, reject_selected, broadcast_selected, rebroadcast_selected, check_selected]

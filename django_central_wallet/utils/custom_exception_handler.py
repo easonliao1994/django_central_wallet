@@ -37,3 +37,21 @@ class EmailFormatException(CustomException):
 
 class UserAlreadyExistsException(CustomException):
     default_detail = ErrorDetail('user_already_exists', 'user_already_exists')
+
+class InvalidAddressException(CustomException):
+    default_detail = ErrorDetail('invalid_address', 'invalid_address')
+
+class InvalidAmountException(CustomException):
+    default_detail = ErrorDetail('invalid_amount', 'invalid_amount')
+
+class AmountBelowMinimumException(CustomException):
+    default_detail = ErrorDetail('amount_below_minimum', 'amount_below_minimum')
+
+class InsufficientBalanceException(CustomException):
+    default_detail = ErrorDetail('insufficient_balance', 'insufficient_balance')
+
+class DailyLimitExceededException(CustomException):
+    default_detail = ErrorDetail('daily_limit_exceeded', 'daily_limit_exceeded')
+
+class WithdrawalNotAllowedException(CustomException):
+    default_detail = ErrorDetail('withdrawal_not_allowed', 'withdrawal_not_allowed')
