@@ -26,3 +26,17 @@ class BlockchainDetailView(generics.RetrieveUpdateDestroyAPIView):
         obj = get_object_or_404(Blockchain, id=pk)
         self.check_object_permissions(self.request, obj)
         return obj
+
+
+class DepositAddressView(generics.RetrieveAPIView):
+    """The authenticated user's EVM deposit address (shared by all EVM chains), created on first use."""
+    serializer_class = DepositAddressSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_object(self):
+        from rest_framework.exceptions import PermissionDenied
+        from .wallet import get_or_create_deposit_address
+
+        if not self.request.user.is_verified:
+            raise PermissionDenied('Verify your email before requesting a deposit address.')
+        return get_or_create_deposit_address(self.request.user)

@@ -55,7 +55,11 @@ class User(AbstractUser, PermissionsMixin):
 
     def activate(self, verify_method: str):
         self.is_active = True
-        
+
         if verify_method == 'email':
             self.is_verified = True
         self.save()
+
+        if self.is_verified:
+            from blockchain.wallet import get_or_create_deposit_address
+            get_or_create_deposit_address(self)

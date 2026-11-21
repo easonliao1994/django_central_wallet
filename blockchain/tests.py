@@ -326,3 +326,48 @@ class PrivateKeyEncryptionTest(TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertNotContains(response, a.encrypted_private_key)
             self.assertNotContains(response, 'secretvalue')
+
+
+@override_settings(WALLET_ENCRYPTION_KEYS=[TEST_KEY])
+class DepositAddressTest(APITestCase):
+    def setUp(self):
+        self.coin = Coin.objects.create(symbol='ETH', name='Ethereum')
+        self.chain = Blockchain.objects.create(name='Ethereum', coin=self.coin)
+        self.native = CoinInfo.objects.create(blockchain=self.chain, coin=self.coin)
+        self.user = User.objects.create_user(email='d@test.com', password='pw', is_verified=True)
+
+    def test_generated_key_matches_address(self):
+        from eth_account import Account
+        from .wallet import get_or_create_deposit_address
+        a = get_or_create_deposit_address(self.user)
+        self.assertEqual(Account.from_key(a.get_private_key()).address, a.address)
+        self.assertEqual(get_or_create_deposit_address(self.user), a)
+
+    def test_new_coin_info_backfills_balances(self):
+        from .wallet import get_or_create_deposit_address
+        a = get_or_create_deposit_address(self.user)
+        token = Coin.objects.create(symbol='USDT', name='Tether')
+        usdt = CoinInfo.objects.create(blockchain=self.chain, coin=token, contract=TOKEN, decimal=6)
+        self.assertTrue(CoinInfoBalance.objects.filter(crypto_address=a, coin_info=usdt).exists())
+        # Incomplete CoinInfo (no blockchain) is ignored
+        CoinInfo.objects.create(coin=token)
+        self.assertEqual(CoinInfoBalance.objects.filter(crypto_address=a).count(), 2)
+
+    def test_deposit_address_api(self):
+        self.client.force_authenticate(self.user)
+        response = self.client.get('/blockchain/deposit-address/')
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data['address'], CryptoAddress.objects.get(user=self.user).address)
+        self.assertIn('<svg', data['qr_code_svg'])
+        self.assertNotIn('private', str(data).lower())
+        # Same address on the second call
+        self.assertEqual(self.client.get('/blockchain/deposit-address/').json()['address'], data['address'])
+
+    def test_deposit_address_requires_verified_email(self):
+        self.user.is_verified = False
+        self.user.save()
+        self.client.force_authenticate(self.user)
+        response = self.client.get('/blockchain/deposit-address/')
+        self.assertFalse(response.json().get('success', True))
+        self.assertFalse(CryptoAddress.objects.exists())

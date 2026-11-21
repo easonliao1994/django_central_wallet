@@ -17,13 +17,11 @@ class UserAdmin(admin.ModelAdmin):
             return list()
         return super(UserAdmin, self).get_inline_instances(request, obj)
     
-    @admin.display(description='Generate Address')
-    def generate_address(modeladmin, request, queryset):        
+    @admin.display(description='Generate deposit address (if missing)')
+    def generate_address(modeladmin, request, queryset):
+        from blockchain.wallet import get_or_create_deposit_address
         for user in queryset:
-            address, private_key = generate_address()
-            crypto_address = CryptoAddress(user=user, address=address)
-            crypto_address.set_private_key(private_key)
-            crypto_address.save()
+            get_or_create_deposit_address(user)
         return HttpResponseRedirect(request.get_full_path())
     
     actions = [generate_address]
