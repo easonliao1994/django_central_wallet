@@ -1,8 +1,14 @@
-from django.db import models
-from django_central_wallet.utils.global_method import *
 import io
+import logging
+
 import pyqrcode as pyqrcode
 from django.conf import settings
+from django.db import models
+from django.db.models import Q
+
+from django_central_wallet.utils.global_method import *
+
+logger = logging.getLogger(__name__)
 
 class Coin(models.Model):
     symbol = models.CharField(max_length=32, default='ETH', help_text="Same with blockchain symbol.")
@@ -33,6 +39,9 @@ class Blockchain(models.Model):
     gas_limit_erc20 = models.PositiveIntegerField(default=100000, help_text='The gas limit for ERC20 token transactions on the blockchain network.')
 
     is_auto_sync = models.BooleanField(default=False, help_text='Set to true to automatically sync the blockchain network with our server.')
+    scan_batch_size = models.PositiveIntegerField(default=200, help_text='Maximum number of blocks the chain scanner processes in a single run.')
+    scan_native = models.BooleanField(default=True, help_text='Scan full blocks for native coin deposits. ERC20 deposits are always detected via Transfer logs.')
+    use_finalized_block = models.BooleanField(default=False, help_text="Use the node's 'finalized' block tag instead of confirm_times (e.g. Ethereum PoS).")
     
     class Meta(object):
         unique_together = [("name")]
@@ -68,10 +77,14 @@ class Blockchain(models.Model):
             current_latest_block_number = w3.eth.get_block_number()
             confirm_block_number = current_latest_block_number - self.confirm_times
             return confirm_block_number
-        except Exception as e:
-            print(e)
+        except Exception:
+            logger.exception('Failed to get latest block number for %s', self)
             return None
-    
+
+    def get_native_coin_info(self):
+        """CoinInfo of the native coin (the one without a contract address)."""
+        return CoinInfo.objects.filter(blockchain=self, coin__isnull=False)             .filter(Q(contract__isnull=True) | Q(contract='')).first()
+
     def get_support_contracts(self):
         from django.db.models.functions import Lower
         return list(CoinInfo.objects.annotate(contract_lower=Lower('contract')).filter(blockchain=self, contract__isnull=False).values_list('contract_lower', flat=True))
@@ -136,20 +149,54 @@ class CoinInfoBalance(models.Model):
         return get_blockchain_real_amount(self.coin_info, self.amount)
 
 class TransactionLog(models.Model):
-    tx_id = models.CharField(max_length=256, db_index=True)
+    class Direction(models.TextChoices):
+        DEPOSIT = 'deposit', 'Deposit'
+        WITHDRAWAL = 'withdrawal', 'Withdrawal'
+        INTERNAL = 'internal', 'Internal transfer'
+        SWEEP = 'sweep', 'Sweep'
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        CONFIRMED = 'confirmed', 'Confirmed'
+        FAILED = 'failed', 'Failed'
+
+    # Native coin transfers have no log index; they use this sentinel instead.
+    NATIVE_LOG_INDEX = -1
+
+    tx_id = models.CharField(max_length=256, db_index=True, null=True, blank=True, help_text='Transaction hash (empty until a withdrawal is broadcast).')
+    log_index = models.IntegerField(default=NATIVE_LOG_INDEX, help_text='Log index of the ERC20 Transfer event, -1 for native coin transfers.')
     blockchain = models.ForeignKey(Blockchain, on_delete=models.CASCADE, null=True, blank=True)
     coin_info = models.ForeignKey(CoinInfo, on_delete=models.CASCADE, null=True, blank=True)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='transaction_logs')
+    direction = models.CharField(max_length=16, choices=Direction.choices, default=Direction.DEPOSIT)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
     sender_address = models.CharField(max_length=256, null=True, blank=True)
     recipient_address = models.CharField(max_length=256, null=True, blank=True)
-    amount = models.DecimalField(default=0, max_digits=30, decimal_places=0)
-    
-    status = models.CharField(max_length=100)
-    block_number = models.PositiveIntegerField()
-    nonce = models.PositiveIntegerField()
+    amount = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Amount in the smallest on-chain unit.')
+
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    block_number = models.BigIntegerField(null=True, blank=True)
+    nonce = models.BigIntegerField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            # The database, not a pre-check, guarantees a deposit is credited only once.
+            models.UniqueConstraint(
+                fields=['blockchain', 'tx_id', 'log_index'],
+                condition=Q(direction='deposit'),
+                name='unique_deposit_per_chain_tx_log',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+        ]
 
     def __str__(self):
-        if self.blockchain is not None and self.coin_info is not None:
+        if self.blockchain is not None and self.coin_info is not None and self.coin_info.coin is not None:
             return f'[{self.blockchain.name} - {self.coin_info.coin.symbol}] - {self.tx_id}'
         return f'{self.tx_id}'
-    
+
+    @property
+    def amount_str(self):
+        return get_blockchain_real_amount(self.coin_info, self.amount)
