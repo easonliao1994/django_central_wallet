@@ -38,8 +38,6 @@ class FakeEth:
         return self.latest
 
     def get_block(self, number, full_transactions=False):
-        if number == 'finalized':
-            return {'number': self.latest - 2}
         return {'number': number, 'transactions': self.blocks.get(number, [])}
 
     def get_logs(self, params):
@@ -55,9 +53,21 @@ class FakeEth:
         return self.receipts[h]
 
 
+class FakeManager:
+    def __init__(self, eth):
+        self.eth = eth
+
+    def request_blocking(self, method, params):
+        assert (method, params) == ('eth_getBlockByNumber', ['finalized', False])
+        if getattr(self.eth, 'finalized', None) is None:
+            raise ValueError({'code': -32602, 'message': 'invalid block tag'})
+        return {'number': hex(self.eth.finalized)}
+
+
 class FakeWeb3:
     def __init__(self, eth):
         self.eth = eth
+        self.manager = FakeManager(eth)
 
 
 def transfer_log(block, h, log_index, to, amount, contract=TOKEN, removed=False):
@@ -205,9 +215,23 @@ class ChainScannerTest(TestCase):
     def test_finalized_tag(self):
         self.chain.use_finalized_block = True
         eth = FakeEth(latest=130)
+        eth.finalized = 128
         self.scanner(eth).run()
         self.chain.refresh_from_db()
         self.assertEqual(self.chain.last_block, 128)
+
+    def test_finalized_tag_unsupported_fails_loudly(self):
+        self.chain.use_finalized_block = True
+        with self.assertRaises(ScanError):
+            self.scanner(FakeEth(latest=130)).run()
+        self.chain.refresh_from_db()
+        self.assertEqual(self.chain.last_block, 100)
+
+    def test_rescan_refuses_unconfirmed_block(self):
+        eth = FakeEth(latest=200, logs=[transfer_log(195, tx_hash(1), 0, USER_ADDR, 100)])
+        with self.assertRaises(ScanError):
+            self.scanner(eth).rescan(195)  # 200 - confirm_times(10) = 190
+        self.assertEqual(TransactionLog.objects.count(), 0)
 
     def test_fresh_chain_starts_at_current_block(self):
         self.chain.last_block = 0

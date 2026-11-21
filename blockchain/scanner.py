@@ -36,6 +36,31 @@ class ScanError(Exception):
     """Raised when the chain cannot be read; the cursor is left untouched."""
 
 
+def finalized_block_number(w3) -> int:
+    """Number of the node's 'finalized' block.
+
+    web3.py 5.x does not accept 'finalized' as a block identifier, so the RPC is
+    called directly. Raises ScanError instead of silently falling back, because
+    an operator who enabled this may have lowered confirm_times.
+    """
+    try:
+        block = w3.manager.request_blocking('eth_getBlockByNumber', ['finalized', False])
+        return _to_int(block['number'])
+    except Exception as e:
+        raise ScanError(f"Node does not support the 'finalized' block tag: {e}") from e
+
+
+def safe_block_number(blockchain, w3) -> int:
+    """Highest block considered final for this chain (finalized tag or latest - confirm_times)."""
+    if blockchain.use_finalized_block:
+        return finalized_block_number(w3)
+    try:
+        latest = int(w3.eth.get_block_number())
+    except Exception as e:
+        raise ScanError(f'Failed to get latest block number: {e}') from e
+    return latest - blockchain.confirm_times
+
+
 @dataclass(frozen=True)
 class Deposit:
     tx_id: str
@@ -97,16 +122,7 @@ class ChainScanner:
     # ------------------------------------------------------------- block range
     def target_block(self) -> int:
         """Highest block that is considered final."""
-        if self.blockchain.use_finalized_block:
-            try:
-                return int(self.w3.eth.get_block('finalized')['number'])
-            except Exception:
-                logger.warning('%s: finalized tag unavailable, falling back to confirm_times', self.blockchain)
-        try:
-            latest = int(self.w3.eth.get_block_number())
-        except Exception as e:
-            raise ScanError(f'Failed to get latest block number: {e}') from e
-        return latest - self.blockchain.confirm_times
+        return safe_block_number(self.blockchain, self.w3)
 
     # ----------------------------------------------------------------- public
     def run(self) -> int:
@@ -136,6 +152,9 @@ class ChainScanner:
 
     def rescan(self, block_number: int) -> int:
         """Rescan a single block (e.g. to recover a missed deposit). The cursor is not moved."""
+        target = self.target_block()
+        if block_number > target:
+            raise ScanError(f'Block {block_number} is not confirmed yet (latest confirmed block is {target})')
         deposits = self.collect_deposits(block_number, block_number)
         with transaction.atomic():
             credited = self.credit(deposits)
