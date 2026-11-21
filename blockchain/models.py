@@ -94,6 +94,10 @@ class CoinInfo(models.Model):
     coin = models.ForeignKey(Coin, on_delete=models.SET_NULL, blank=True, null=True, default=None, help_text='The cryptocurrency coin that this information is associated with.')
     decimal = models.IntegerField(default=18, help_text='The number of decimal places for this coin.')
     contract = models.CharField(max_length=256, null=True, blank=True, help_text='The smart contract address associated with this coin (if applicable).')
+    withdrawal_enabled = models.BooleanField(default=True, help_text='Allow users to withdraw this coin.')
+    min_withdrawal_amount = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Minimum withdrawal amount, in the smallest on-chain unit.')
+    daily_withdrawal_limit = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Maximum total withdrawn per user per day, in the smallest on-chain unit. 0 = unlimited.')
+    auto_approve_withdrawal_limit = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Withdrawals up to this amount (smallest on-chain unit) skip admin review. 0 = every withdrawal needs review.')
 
     class Meta(object):
         unique_together = [('blockchain', 'coin')]
@@ -105,10 +109,11 @@ class CoinInfo(models.Model):
     def denominator(self)->int:
         return 10**self.decimal
 
-class CryptoAddress(models.Model):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='crypto_addresses')
-    address = models.CharField(max_length=256, unique=True, help_text='Cryptocurrency wallet address.')
+class EncryptedPrivateKeyModel(models.Model):
     encrypted_private_key = models.TextField(editable=False, help_text='Private key encrypted with WALLET_ENCRYPTION_KEYS. Never displayed.')
+
+    class Meta:
+        abstract = True
 
     def set_private_key(self, private_key: str):
         from .key_vault import encrypt_secret
@@ -118,6 +123,11 @@ class CryptoAddress(models.Model):
         """Decrypt the private key. Only call this right before signing a transaction."""
         from .key_vault import decrypt_secret
         return decrypt_secret(self.encrypted_private_key)
+
+
+class CryptoAddress(EncryptedPrivateKeyModel):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='crypto_addresses')
+    address = models.CharField(max_length=256, unique=True, help_text='Cryptocurrency wallet address.')
 
     def __str__(self):
         return self.address
@@ -132,8 +142,8 @@ class CryptoAddress(models.Model):
         return svg_xml
 
 class CoinInfoBalance(models.Model):
-    crypto_address = models.ForeignKey(CryptoAddress, on_delete=models.CASCADE, help_text='Cryptocurrency wallet address.')
-    coin_info = models.ForeignKey(CoinInfo, on_delete=models.CASCADE, null=False, help_text='Cryptocurrency information.')
+    crypto_address = models.ForeignKey(CryptoAddress, on_delete=models.PROTECT, help_text='Cryptocurrency wallet address.')
+    coin_info = models.ForeignKey(CoinInfo, on_delete=models.PROTECT, null=False, help_text='Cryptocurrency information.')
     internal_amount = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Amount of coins in internal transfer.')
     external_amount = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Amount of coins in external transfer.')
 
@@ -177,8 +187,8 @@ class TransactionLog(models.Model):
 
     tx_id = models.CharField(max_length=256, db_index=True, null=True, blank=True, help_text='Transaction hash (empty until a withdrawal is broadcast).')
     log_index = models.IntegerField(default=NATIVE_LOG_INDEX, help_text='Log index of the ERC20 Transfer event, -1 for native coin transfers.')
-    blockchain = models.ForeignKey(Blockchain, on_delete=models.CASCADE, null=True, blank=True)
-    coin_info = models.ForeignKey(CoinInfo, on_delete=models.CASCADE, null=True, blank=True)
+    blockchain = models.ForeignKey(Blockchain, on_delete=models.PROTECT, null=True, blank=True)
+    coin_info = models.ForeignKey(CoinInfo, on_delete=models.PROTECT, null=True, blank=True)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='transaction_logs')
     direction = models.CharField(max_length=16, choices=Direction.choices, default=Direction.DEPOSIT)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -208,6 +218,58 @@ class TransactionLog(models.Model):
         if self.blockchain is not None and self.coin_info is not None and self.coin_info.coin is not None:
             return f'[{self.blockchain.name} - {self.coin_info.coin.symbol}] - {self.tx_id}'
         return f'{self.tx_id}'
+
+    @property
+    def amount_str(self):
+        return get_blockchain_real_amount(self.coin_info, self.amount)
+
+
+class HotWallet(EncryptedPrivateKeyModel):
+    """Platform wallet that signs and pays withdrawals on one blockchain."""
+    blockchain = models.OneToOneField(Blockchain, on_delete=models.PROTECT, related_name='hot_wallet')
+    address = models.CharField(max_length=256, editable=False)
+    next_nonce = models.BigIntegerField(default=0, help_text='Next nonce to use. The higher of this and the pending nonce reported by the node is used.')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f'{self.blockchain} hot wallet {self.address}'
+
+
+class Withdrawal(models.Model):
+    class Status(models.TextChoices):
+        PENDING_REVIEW = 'pending_review', 'Pending review'
+        APPROVED = 'approved', 'Approved (waiting to broadcast)'
+        BROADCAST = 'broadcast', 'Broadcast (waiting for confirmation)'
+        STUCK = 'stuck', 'Stuck (not mined in time)'
+        CONFIRMED = 'confirmed', 'Confirmed'
+        FAILED = 'failed', 'Failed (refunded)'
+        REJECTED = 'rejected', 'Rejected (refunded)'
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='withdrawals')
+    crypto_address = models.ForeignKey(CryptoAddress, on_delete=models.PROTECT, help_text='Address whose platform balance is debited.')
+    coin_info = models.ForeignKey(CoinInfo, on_delete=models.PROTECT)
+    to_address = models.CharField(max_length=256)
+    amount = models.DecimalField(max_digits=30, decimal_places=0, help_text='Amount in the smallest on-chain unit.')
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING_REVIEW, db_index=True)
+
+    tx_id = models.CharField(max_length=256, null=True, blank=True, db_index=True)
+    previous_tx_ids = models.JSONField(default=list, blank=True, help_text='Hashes of earlier broadcasts replaced by a rebroadcast (same nonce).')
+    nonce = models.BigIntegerField(null=True, blank=True)
+    gas_price = models.DecimalField(max_digits=30, decimal_places=0, null=True, blank=True)
+    broadcast_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(blank=True, default='')
+
+    transaction_log = models.OneToOneField(TransactionLog, on_delete=models.SET_NULL, null=True, blank=True, related_name='withdrawal')
+    reviewed_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-id']
+
+    def __str__(self):
+        return f'Withdrawal #{self.pk} {self.amount_str} {self.coin_info} -> {self.to_address} ({self.status})'
 
     @property
     def amount_str(self):
