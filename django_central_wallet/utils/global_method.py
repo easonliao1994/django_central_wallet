@@ -45,14 +45,6 @@ def get_erc20_abi():
 def get_erc20_contract(w3, contract_address):
     return w3.eth.contract(address=contract_address, abi=get_erc20_abi())
 
-def generate_address():
-    import os
-    from ethereum.utils import privtoaddr, checksum_encode, sha3
-    key = sha3(os.urandom(4096))
-    address = checksum_encode(privtoaddr(key))
-    private_key = key.hex()
-    return address, private_key
-
 def get_blockchain_real_amount(coin_info, amount: int):
     if None in [coin_info, amount]:
         return None

@@ -38,3 +38,14 @@ class BlockchainSerializer(serializers.ModelSerializer):
     class Meta:
         model = Blockchain
         fields = ['id', 'name', 'block_explorer_url', 'gas_limit', 'gas_limit_erc20', 'currency', 'coins']
+
+
+class DepositAddressSerializer(serializers.ModelSerializer):
+    qr_code_svg = serializers.SerializerMethodField()
+
+    def get_qr_code_svg(self, obj) -> str:
+        return obj.as_svg_qrcode(xml=True)
+
+    class Meta:
+        model = CryptoAddress
+        fields = ['address', 'qr_code_svg']

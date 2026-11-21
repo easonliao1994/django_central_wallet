@@ -31,10 +31,9 @@ class CryptoAddressAdmin(admin.ModelAdmin):
 
     @admin.display(description='Generate Balance')
     def generate_balance(modeladmin, request, queryset):
-        coin_infos = CoinInfo.objects.filter(blockchain__isnull=False, coin__isnull=False)
+        from .wallet import ensure_balances
         for address in queryset:
-            for coin_info in coin_infos:
-                CoinInfoBalance.objects.get_or_create(crypto_address=address, coin_info=coin_info)
+            ensure_balances(address)
     
     actions = [generate_balance]
 
