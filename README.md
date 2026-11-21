@@ -22,6 +22,8 @@ Edit `.env`:
 
 Then run `python manage.py migrate`.
 
+Use PostgreSQL in production: balance and nonce handling rely on row locks (`select_for_update`), which SQLite ignores.
+
 ## Usage
 
 ```
@@ -59,7 +61,7 @@ python manage.py rotate_wallet_keys
 ## How it works
 
 - **Deposits**: ERC20 deposits are detected from `Transfer` event logs (`eth_getLogs`), so reverted transfers are never credited and `transferFrom`/multisend deposits are included. Native coin deposits are found by reading blocks and are credited only when the receipt status is 1. Only blocks with `confirm_times` confirmations (or the `finalized` tag) are processed, and a unique constraint on `(blockchain, tx_id, log_index)` makes rescans safe.
-- **Withdrawals**: the balance is debited when requested; approved withdrawals are signed by the chain's hot wallet and confirmed by polling the transaction receipt. Reverted or rejected withdrawals are refunded.
+- **Withdrawals**: the balance is debited when requested; approved withdrawals are signed by the chain's hot wallet and confirmed by polling the transaction receipt. A withdrawal keeps its nonce once signed, so it can be paid at most once even when the RPC node returns errors; stuck ones are rebroadcast with the same nonce. Reverted withdrawals, and ones rejected before signing, are refunded.
 - **Reconciliation**: a daily job compares on-chain balances with recorded deposits and sweeps and logs mismatches.
 
 ## Features
