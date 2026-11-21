@@ -187,7 +187,7 @@ class WithdrawalAdmin(admin.ModelAdmin):
         from .withdrawals import approve
         modeladmin._run(request, queryset, lambda w: approve(w, request.user), 'Approved')
 
-    @admin.display(description='Reject selected withdrawals (refund balance)')
+    @admin.display(description='Reject selected withdrawals not yet signed (refund balance)')
     def reject_selected(modeladmin, request, queryset):
         from .withdrawals import reject
         modeladmin._run(request, queryset, lambda w: reject(w, request.user), 'Rejected')

@@ -126,7 +126,7 @@ class EncryptedPrivateKeyModel(models.Model):
 
 
 class CryptoAddress(EncryptedPrivateKeyModel):
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='crypto_addresses')
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='crypto_addresses')
     address = models.CharField(max_length=256, unique=True, help_text='Cryptocurrency wallet address.')
 
     def __str__(self):
@@ -142,8 +142,8 @@ class CryptoAddress(EncryptedPrivateKeyModel):
         return svg_xml
 
 class CoinInfoBalance(models.Model):
-    crypto_address = models.ForeignKey(CryptoAddress, on_delete=models.CASCADE, help_text='Cryptocurrency wallet address.')
-    coin_info = models.ForeignKey(CoinInfo, on_delete=models.CASCADE, null=False, help_text='Cryptocurrency information.')
+    crypto_address = models.ForeignKey(CryptoAddress, on_delete=models.PROTECT, help_text='Cryptocurrency wallet address.')
+    coin_info = models.ForeignKey(CoinInfo, on_delete=models.PROTECT, null=False, help_text='Cryptocurrency information.')
     internal_amount = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Amount of coins in internal transfer.')
     external_amount = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Amount of coins in external transfer.')
 
@@ -187,8 +187,8 @@ class TransactionLog(models.Model):
 
     tx_id = models.CharField(max_length=256, db_index=True, null=True, blank=True, help_text='Transaction hash (empty until a withdrawal is broadcast).')
     log_index = models.IntegerField(default=NATIVE_LOG_INDEX, help_text='Log index of the ERC20 Transfer event, -1 for native coin transfers.')
-    blockchain = models.ForeignKey(Blockchain, on_delete=models.CASCADE, null=True, blank=True)
-    coin_info = models.ForeignKey(CoinInfo, on_delete=models.CASCADE, null=True, blank=True)
+    blockchain = models.ForeignKey(Blockchain, on_delete=models.PROTECT, null=True, blank=True)
+    coin_info = models.ForeignKey(CoinInfo, on_delete=models.PROTECT, null=True, blank=True)
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='transaction_logs')
     direction = models.CharField(max_length=16, choices=Direction.choices, default=Direction.DEPOSIT)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -226,7 +226,7 @@ class TransactionLog(models.Model):
 
 class HotWallet(EncryptedPrivateKeyModel):
     """Platform wallet that signs and pays withdrawals on one blockchain."""
-    blockchain = models.OneToOneField(Blockchain, on_delete=models.CASCADE, related_name='hot_wallet')
+    blockchain = models.OneToOneField(Blockchain, on_delete=models.PROTECT, related_name='hot_wallet')
     address = models.CharField(max_length=256, editable=False)
     next_nonce = models.BigIntegerField(default=0, help_text='Next nonce to use. The higher of this and the pending nonce reported by the node is used.')
     created_at = models.DateTimeField(auto_now_add=True)

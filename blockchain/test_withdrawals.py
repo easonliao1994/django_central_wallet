@@ -24,9 +24,10 @@ ETH = 10 ** 18
 
 
 class FakeEth:
-    def __init__(self, latest=1000, pending_nonce=0, gas_price=10, send_error=None):
+    def __init__(self, latest=1000, pending_nonce=0, gas_price=10, send_error=None, mined_nonce=0):
         self.latest = latest
         self.pending_nonce = pending_nonce
+        self.mined_nonce = mined_nonce
         self.gas_price = gas_price
         self.send_error = send_error
         self.sent = []
@@ -36,7 +37,7 @@ class FakeEth:
         return self.latest
 
     def get_transaction_count(self, address, block_identifier='latest'):
-        return self.pending_nonce
+        return self.pending_nonce if block_identifier == 'pending' else self.mined_nonce
 
     def send_raw_transaction(self, raw):
         if self.send_error:
@@ -99,8 +100,31 @@ class WithdrawalRequestTest(WithdrawalTestBase):
     def test_auto_approve_limit(self):
         self.native.auto_approve_withdrawal_limit = ETH
         self.native.save()
-        self.assertEqual(wd.request_withdrawal(self.user, self.native, DEST, ETH).status, Withdrawal.Status.APPROVED)
         self.assertEqual(wd.request_withdrawal(self.user, self.native, DEST, ETH + 1).status, Withdrawal.Status.PENDING_REVIEW)
+        WithdrawalRequestTest.reject_all(self)
+        self.assertEqual(wd.request_withdrawal(self.user, self.native, DEST, ETH).status, Withdrawal.Status.APPROVED)
+
+    def test_auto_approve_limit_applies_to_daily_total(self):
+        self.native.auto_approve_withdrawal_limit = ETH
+        self.native.save()
+        statuses = [wd.request_withdrawal(self.user, self.native, DEST, ETH // 2).status for _ in range(3)]
+        self.assertEqual(statuses, [Withdrawal.Status.APPROVED, Withdrawal.Status.APPROVED, Withdrawal.Status.PENDING_REVIEW])
+
+    def reject_all(self):
+        for w in Withdrawal.objects.all():
+            wd.reject(w)
+
+    def test_debits_an_address_that_holds_enough(self):
+        second = CryptoAddress(user=self.user, address='0x' + '66' * 20)
+        second.set_private_key('0x1')
+        second.save()
+        from .wallet import ensure_balances
+        ensure_balances(second)
+        CoinInfoBalance.objects.filter(crypto_address=second, coin_info=self.native).update(external_amount=10 * ETH)
+        w = wd.request_withdrawal(self.user, self.native, DEST, 7 * ETH)
+        self.assertEqual(w.crypto_address, second)
+        with self.assertRaises(InvalidAddressException):  # any own address is refused as destination
+            wd.request_withdrawal(self.user, self.native, second.address, ETH)
 
     def test_validation(self):
         with self.assertRaises(InvalidAddressException):
@@ -189,22 +213,73 @@ class WithdrawalBroadcastTest(WithdrawalTestBase):
         w.refresh_from_db()
         self.assertEqual(w.nonce, 10)
 
-    def test_node_rejection_requeues_and_releases_nonce(self):
+    def test_send_error_keeps_nonce_and_never_resigns_with_a_new_one(self):
+        # A gateway can return an error after forwarding the tx: the withdrawal must keep its nonce.
         w = self.approved()
-        eth = FakeEth(pending_nonce=4, send_error=ValueError({'code': -32000, 'message': 'insufficient funds'}))
+        eth = FakeEth(pending_nonce=4, send_error=ValueError({'code': -32000, 'message': 'upstream timeout'}))
         self.assertFalse(wd.broadcast(w, FakeWeb3(eth)))
         w.refresh_from_db()
-        self.assertEqual(w.status, Withdrawal.Status.APPROVED)
-        self.assertIsNone(w.tx_id)
-        self.assertIn('insufficient funds', w.error_message)
+        self.assertEqual((w.status, w.nonce), (Withdrawal.Status.BROADCAST, 4))
+        self.assertIn('upstream timeout', w.error_message)
+        self.assertFalse(wd.reject(w))  # may already be paid
         self.hot.refresh_from_db()
-        self.assertEqual(self.hot.next_nonce, 4)
-        self.assertEqual(self.balance(self.native), 4 * ETH)  # still debited, will be retried
+        self.assertEqual(self.hot.next_nonce, 5)
+
+        # Not broadcast again with another nonce, even when the node's pending count moves on.
+        eth.send_error, eth.pending_nonce = None, 5
+        self.assertEqual(wd.broadcast_approved(self.chain, FakeWeb3(eth)), 0)
+        # Once stuck it is re-sent with the same nonce.
+        Withdrawal.objects.filter(pk=w.pk).update(status=Withdrawal.Status.STUCK)
+        self.assertEqual(wd.rebroadcast_stuck(self.chain, FakeWeb3(eth)), 1)
+        w.refresh_from_db()
+        self.assertEqual((w.status, w.nonce), (Withdrawal.Status.BROADCAST, 4))
+        self.assertEqual(self.balance(self.native), 4 * ETH)
+
+    def test_requeue_only_when_nonce_provably_taken_by_another_tx(self):
+        w = self.approved()
+        eth = FakeEth(latest=100, pending_nonce=2)
+        wd.broadcast(w, FakeWeb3(eth))
+        w.refresh_from_db()
+        first_tx = w.tx_id
+
+        eth.mined_nonce = 3  # nonce 2 used in a final block, but no receipt for our hash
+        self.assertEqual(wd.check_broadcast_withdrawals(self.chain, FakeWeb3(eth))['requeued'], 0)  # not stuck yet
+        Withdrawal.objects.filter(pk=w.pk).update(status=Withdrawal.Status.STUCK)
+        self.assertEqual(wd.check_broadcast_withdrawals(self.chain, FakeWeb3(eth))['requeued'], 1)
+        w.refresh_from_db()
+        self.assertEqual((w.status, w.nonce, w.tx_id), (Withdrawal.Status.APPROVED, None, None))
+        self.assertEqual(w.previous_tx_ids, [first_tx])
+        self.assertFalse(wd.reject(w))  # it was signed before: never refund by hand
+
+        eth.pending_nonce = 3
+        wd.broadcast(w, FakeWeb3(eth))
+        w.refresh_from_db()
+        self.assertEqual(w.nonce, 3)
+
+    def test_not_requeued_when_our_tx_was_mined(self):
+        w = self.approved()
+        eth = FakeEth(latest=100, pending_nonce=2)
+        wd.broadcast(w, FakeWeb3(eth))
+        w.refresh_from_db()
+        Withdrawal.objects.filter(pk=w.pk).update(status=Withdrawal.Status.STUCK)
+        eth.mined_nonce = 3
+        eth.receipts[w.tx_id] = {'status': 1, 'blockNumber': 90}
+        self.assertEqual(wd.check_broadcast_withdrawals(self.chain, FakeWeb3(eth))['confirmed'], 1)
+
+    def test_rebroadcast_gas_price_is_capped(self):
+        w = self.approved()
+        eth = FakeEth(gas_price=1000)
+        wd.broadcast(w, FakeWeb3(eth))
+        eth.gas_price = 100
+        Withdrawal.objects.filter(pk=w.pk).update(status=Withdrawal.Status.STUCK)
+        wd.rebroadcast(w, FakeWeb3(eth))
+        w.refresh_from_db()
+        self.assertEqual(int(w.gas_price), 200)  # min(1000 * 1.125, 2 * current) = 200
 
     def test_ambiguous_send_error_keeps_broadcast(self):
         w = self.approved()
         eth = FakeEth(send_error=TimeoutError('read timeout'))
-        self.assertTrue(wd.broadcast(w, FakeWeb3(eth)))
+        self.assertFalse(wd.broadcast(w, FakeWeb3(eth)))  # not confirmed sent, but kept
         w.refresh_from_db()
         self.assertEqual(w.status, Withdrawal.Status.BROADCAST)
         self.assertIsNotNone(w.tx_id)
@@ -221,23 +296,28 @@ class WithdrawalBroadcastTest(WithdrawalTestBase):
     def test_confirmation_and_failure_via_receipts(self):
         ok = self.approved()
         bad = self.approved()
-        eth = FakeEth(latest=100)
-        wd.broadcast_approved(self.chain, FakeWeb3(eth))
+        eth = FakeEth(latest=100, pending_nonce=0)
+        eth_w3 = FakeWeb3(eth)
+        wd.broadcast(ok, eth_w3)
+        eth.pending_nonce = 1
+        wd.broadcast(bad, eth_w3)
         ok.refresh_from_db()
         bad.refresh_from_db()
-        eth.receipts[ok.tx_id] = {'status': 1, 'blockNumber': 99}
-        eth.receipts[bad.tx_id] = {'status': 0, 'blockNumber': 98}
+        eth.receipts[ok.tx_id] = {'status': 1, 'blockNumber': 98}
+        eth.receipts[bad.tx_id] = {'status': 0, 'blockNumber': 97}
 
-        # 99 has only 2 confirmations (confirm_times=3): ok stays broadcast; 98 has 3 -> final
-        self.assertEqual(wd.check_broadcast_withdrawals(self.chain, FakeWeb3(eth)), {'confirmed': 0, 'failed': 1, 'stuck': 0})
+        # Final block = latest - confirm_times = 97: only "bad" is final so far.
+        self.assertEqual(wd.check_broadcast_withdrawals(self.chain, eth_w3),
+                         {'confirmed': 0, 'failed': 1, 'stuck': 0, 'requeued': 0})
         eth.latest = 101
-        self.assertEqual(wd.check_broadcast_withdrawals(self.chain, FakeWeb3(eth)), {'confirmed': 1, 'failed': 0, 'stuck': 0})
+        self.assertEqual(wd.check_broadcast_withdrawals(self.chain, eth_w3),
+                         {'confirmed': 1, 'failed': 0, 'stuck': 0, 'requeued': 0})
 
         ok.refresh_from_db()
         bad.refresh_from_db()
         self.assertEqual(ok.status, Withdrawal.Status.CONFIRMED)
         self.assertEqual(ok.transaction_log.status, TransactionLog.Status.CONFIRMED)
-        self.assertEqual(ok.transaction_log.block_number, 99)
+        self.assertEqual(ok.transaction_log.block_number, 98)
         self.assertEqual(bad.status, Withdrawal.Status.FAILED)
         self.assertEqual(bad.transaction_log.status, TransactionLog.Status.FAILED)
         self.assertEqual(self.balance(self.native), 4 * ETH)  # 5 - 1 confirmed; failed one refunded
@@ -263,6 +343,45 @@ class WithdrawalBroadcastTest(WithdrawalTestBase):
         wd.check_broadcast_withdrawals(self.chain, FakeWeb3(eth))
         w.refresh_from_db()
         self.assertEqual((w.status, w.tx_id), (Withdrawal.Status.CONFIRMED, first_tx))
+
+    def test_token_withdrawal_needs_transfer_log(self):
+        from .scanner import TRANSFER_TOPIC
+
+        def topic(a):
+            return '0x' + '0' * 24 + a.lower()[2:]
+
+        silent = self.approved(self.usdt, 1_000_000)
+        real = self.approved(self.usdt, 2_000_000)
+        eth = FakeEth(latest=100)
+        wd.broadcast(silent, FakeWeb3(eth))
+        eth.pending_nonce = 1
+        wd.broadcast(real, FakeWeb3(eth))
+        silent.refresh_from_db()
+        real.refresh_from_db()
+        eth.receipts[silent.tx_id] = {'status': 1, 'blockNumber': 90, 'logs': []}  # token returned false
+        eth.receipts[real.tx_id] = {'status': 1, 'blockNumber': 90, 'logs': [{
+            'address': TOKEN, 'topics': [TRANSFER_TOPIC, topic(self.hot.address), topic(DEST)],
+            'data': hex(2_000_000)}]}
+        self.assertEqual(wd.check_broadcast_withdrawals(self.chain, FakeWeb3(eth)),
+                         {'confirmed': 1, 'failed': 1, 'stuck': 0, 'requeued': 0})
+        silent.refresh_from_db()
+        self.assertEqual(silent.status, Withdrawal.Status.FAILED)
+        self.assertEqual(self.balance(self.usdt), 1_000_000_000 - 2_000_000)
+
+    def test_finalized_tag_used_for_withdrawal_confirmation(self):
+        self.chain.use_finalized_block = True
+        self.chain.save()
+        w = self.approved()
+        eth = FakeEth(latest=1000)
+        w3 = FakeWeb3(eth)
+        w3.manager = mock.Mock()
+        w3.manager.request_blocking.return_value = {'number': hex(50)}
+        wd.broadcast(w, w3)
+        w.refresh_from_db()
+        eth.receipts[w.tx_id] = {'status': 1, 'blockNumber': 60}
+        self.assertEqual(wd.check_broadcast_withdrawals(self.chain, w3)['confirmed'], 0)
+        w3.manager.request_blocking.return_value = {'number': hex(60)}
+        self.assertEqual(wd.check_broadcast_withdrawals(self.chain, w3)['confirmed'], 1)
 
 
 @override_settings(WALLET_ENCRYPTION_KEYS=[TEST_KEY])
@@ -321,3 +440,38 @@ class WithdrawalAdminTest(TestCase):
         self.assertEqual(Account.from_key(hot.get_private_key()).address, hot.address)
         page = self.client.get(f'/admin/blockchain/hotwallet/{hot.pk}/change/')
         self.assertNotContains(page, hot.encrypted_private_key)
+
+
+@override_settings(WALLET_ENCRYPTION_KEYS=[TEST_KEY])
+class HardeningTest(TestCase):
+    setUp = WithdrawalTestBase.setUp
+    set_balance = WithdrawalTestBase.set_balance
+
+    def test_rotation_includes_hot_wallets(self):
+        import os
+        from django.core.management import call_command
+        new_key = 'mF0r7tq9nQ2l8gZ1cV6bX3yK5wE4aR0sD7fH2jL9pO8='
+        with override_settings(WALLET_ENCRYPTION_KEYS=[new_key, TEST_KEY]):
+            call_command('rotate_wallet_keys', stdout=open(os.devnull, 'w'))
+        with override_settings(WALLET_ENCRYPTION_KEYS=[new_key]):
+            HotWallet.objects.get().get_private_key()
+            CryptoAddress.objects.get().get_private_key()
+
+    def test_blockchain_api_is_read_only_for_users(self):
+        from rest_framework.test import APIClient
+        client = APIClient()
+        client.force_authenticate(self.user)
+        self.assertEqual(client.get(f'/blockchain/{self.chain.pk}/').status_code, 200)
+        for method in ('patch', 'delete'):
+            response = getattr(client, method)(f'/blockchain/{self.chain.pk}/', {'gas_limit': 1}, format='json')
+            self.assertEqual(response.json().get('error'), 'permission_denied', method)
+        self.assertEqual(client.post('/blockchain/', {'name': 'x'}, format='json').json().get('error'), 'permission_denied')
+        self.chain.refresh_from_db()
+        self.assertEqual(self.chain.gas_limit, 21000)
+
+    def test_chain_with_hot_wallet_or_history_cannot_be_deleted(self):
+        from django.db.models import ProtectedError
+        with self.assertRaises(ProtectedError):
+            self.chain.delete()
+        with self.assertRaises(ProtectedError):
+            self.user.delete()  # would otherwise delete the encrypted deposit key

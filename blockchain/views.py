@@ -6,11 +6,19 @@ from django_central_wallet.utils.paginations import CustomPagination
 from .serializers import *
 from django.shortcuts import get_object_or_404
 
-# Create your views here.
+class IsAdminOrReadOnly(permissions.BasePermission):
+    """Authenticated users can read; only admins can create, update or delete."""
+
+    def has_permission(self, request, view):
+        if not (request.user and request.user.is_authenticated):
+            return False
+        return request.method in permissions.SAFE_METHODS or request.user.is_staff
+
+
 class BlockchainViewSet(AutoPrefetchViewSetMixin, viewsets.ModelViewSet):
     queryset = Blockchain.objects.all()
     serializer_class = BlockchainSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAdminOrReadOnly]
     pagination_class = CustomPagination
     
     def get_queryset(self):
@@ -19,7 +27,7 @@ class BlockchainViewSet(AutoPrefetchViewSetMixin, viewsets.ModelViewSet):
 
 class BlockchainDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = BlockchainSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsAdminOrReadOnly]
 
     def get_object(self):
         pk = self.kwargs["pk"]
