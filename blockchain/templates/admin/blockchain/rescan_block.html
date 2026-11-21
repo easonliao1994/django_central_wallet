@@ -1,0 +1,14 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<p>Rescan one block for the following blockchains. Deposits already credited are skipped automatically; the scan cursor is not moved.</p>
+<ul>
+  {% for blockchain in queryset %}<li>{{ blockchain }}</li>{% endfor %}
+</ul>
+<form method="post">
+  {% csrf_token %}
+  {{ form.as_p }}
+  <input type="hidden" name="action" value="rescan_block">
+  <input type="submit" name="apply" value="Rescan">
+</form>
+{% endblock %}

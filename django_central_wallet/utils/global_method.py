@@ -32,18 +32,18 @@ def get_web3(blockchain, middleware_inject=False):
         w3.middleware_onion.inject(geth_poa_middleware, layer=0)
     return w3
 
+_ERC20_ABI = None
+
+def get_erc20_abi():
+    global _ERC20_ABI
+    if _ERC20_ABI is None:
+        from django.conf import settings
+        with open(settings.BASE_DIR / 'abi' / 'erc20.json', 'r') as f:
+            _ERC20_ABI = json.load(f)
+    return _ERC20_ABI
+
 def get_erc20_contract(w3, contract_address):
-    try:
-        with open('abi/erc20.json', 'r') as f:
-            contract_abi = json.load(f)
-    except FileNotFoundError:
-        print("Error: ABI file not found")
-        return None
-    except json.JSONDecodeError:
-        print("Error: Invalid ABI file format")
-        return None
-    
-    return w3.eth.contract(address=contract_address, abi=contract_abi)
+    return w3.eth.contract(address=contract_address, abi=get_erc20_abi())
 
 def generate_address():
     import os
