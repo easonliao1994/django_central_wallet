@@ -10,3 +10,5 @@ web3==5.30.0
 bit==0.8.0
 python-dotenv==1.0.0
 cryptography==42.0.8
+celery==5.4.0
+redis==6.4.0
