@@ -60,14 +60,23 @@ class TaskTest(TestCase):
         with mock.patch('blockchain.scanner.ChainScanner.run', side_effect=ScanError('rpc down')):
             self.assertEqual(tasks.scan_chain(self.auto.pk), 0)
 
-    def test_process_withdrawals_runs_broadcast_and_check(self):
+    def test_process_withdrawals_runs_full_pass(self):
         with mock.patch('blockchain.models.Blockchain.get_web3', return_value=object()), \
-                mock.patch('blockchain.withdrawals.broadcast_approved', return_value=2) as b, \
                 mock.patch('blockchain.withdrawals.check_broadcast_withdrawals',
-                           return_value={'confirmed': 1, 'failed': 0, 'stuck': 0}) as c:
-            self.assertEqual(tasks.process_withdrawals(self.auto.pk), {'sent': 2, 'confirmed': 1, 'failed': 0, 'stuck': 0})
-        b.assert_called_once()
+                           return_value={'confirmed': 1, 'failed': 0, 'stuck': 0, 'requeued': 0}) as c, \
+                mock.patch('blockchain.withdrawals.rebroadcast_stuck', return_value=1) as r, \
+                mock.patch('blockchain.withdrawals.broadcast_approved', return_value=2) as b:
+            self.assertEqual(tasks.process_withdrawals(self.auto.pk),
+                             {'confirmed': 1, 'failed': 0, 'stuck': 0, 'requeued': 0, 'rebroadcast': 1, 'sent': 2})
         c.assert_called_once()
+        r.assert_called_once()
+        b.assert_called_once()
+
+    def test_process_withdrawals_command_respects_lock(self):
+        from django.core.management.base import CommandError
+        with single_run_lock(f'withdrawals:{self.auto.pk}', 60):
+            with self.assertRaises(CommandError):
+                call_command('process_withdrawals', chain=self.auto.pk, stdout=mock.Mock())
 
     def test_scan_chain_command(self):
         with mock.patch('blockchain.scanner.ChainScanner.rescan', return_value=1) as rescan:

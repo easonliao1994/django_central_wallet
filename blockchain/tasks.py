@@ -54,22 +54,18 @@ def scan_chain(blockchain_id: int):
 
 @shared_task(name='blockchain.process_withdrawals', soft_time_limit=TASK_TIME_LIMIT)
 def process_withdrawals(blockchain_id: int):
-    from .withdrawals import BroadcastError, broadcast_approved, check_broadcast_withdrawals
+    from .withdrawals import BroadcastError, process_chain_withdrawals
 
     with single_run_lock(f'withdrawals:{blockchain_id}', LOCK_TIMEOUT) as acquired:
         if not acquired:
             return 'skipped: already running'
         blockchain = Blockchain.objects.get(pk=blockchain_id)
         try:
-            w3 = blockchain.get_web3(middleware_inject=True)
-            if w3 is None:
-                raise BroadcastError(f'No reachable RPC endpoint for {blockchain}')
-            sent = broadcast_approved(blockchain, w3)
-            checked = check_broadcast_withdrawals(blockchain, w3)
+            # Confirm / finalise, rebroadcast stuck ones (same nonce), then send approved ones.
+            return process_chain_withdrawals(blockchain)
         except BroadcastError as e:
             logger.warning('%s: withdrawal processing aborted: %s', blockchain, e)
             return str(e)
-        return {'sent': sent, **checked}
 
 
 @shared_task(name='blockchain.reconcile_balances', soft_time_limit=3600)
