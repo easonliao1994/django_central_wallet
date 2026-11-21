@@ -108,7 +108,19 @@ class CoinInfo(models.Model):
 class CryptoAddress(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='crypto_addresses')
     address = models.CharField(max_length=256, unique=True, help_text='Cryptocurrency wallet address.')
-    private_key = models.CharField(max_length=256, help_text='Cryptocurrency wallet private key.')
+    encrypted_private_key = models.TextField(editable=False, help_text='Private key encrypted with WALLET_ENCRYPTION_KEYS. Never displayed.')
+
+    def set_private_key(self, private_key: str):
+        from .key_vault import encrypt_secret
+        self.encrypted_private_key = encrypt_secret(private_key)
+
+    def get_private_key(self) -> str:
+        """Decrypt the private key. Only call this right before signing a transaction."""
+        from .key_vault import decrypt_secret
+        return decrypt_secret(self.encrypted_private_key)
+
+    def __str__(self):
+        return self.address
 
     def as_svg_qrcode(self, xml=False):
         buffer = io.BytesIO()

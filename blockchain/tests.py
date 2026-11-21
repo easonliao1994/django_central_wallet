@@ -1,7 +1,8 @@
+import os
 from unittest import mock
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APITestCase
 
 from .models import *
@@ -109,7 +110,7 @@ class ChainScannerTest(TestCase):
         self.native = CoinInfo.objects.create(blockchain=self.chain, coin=self.eth_coin, decimal=18)
         self.usdt = CoinInfo.objects.create(blockchain=self.chain, coin=self.usdt_coin, decimal=6, contract=TOKEN)
         self.user = User.objects.create_user(email='u@test.com', password='pw')
-        self.address = CryptoAddress.objects.create(user=self.user, address=USER_ADDR.upper().replace('0X', '0x'), private_key='x')
+        self.address = CryptoAddress.objects.create(user=self.user, address=USER_ADDR.upper().replace('0X', '0x'), encrypted_private_key='unused')
 
     def balance(self, coin_info):
         b = CoinInfoBalance.objects.filter(crypto_address=self.address, coin_info=coin_info).first()
@@ -278,3 +279,50 @@ class BlockchainAdminActionTest(TestCase):
                                               'block_number': 123, 'apply': 'Rescan'}, follow=True)
         rescan.assert_called_once_with(123)
         self.assertContains(response, 'rescanned block 123')
+
+
+TEST_KEY = 'q2zQm1p2kqgk9b6r3XyUoJmYyq1x0n8nqQ3sV5hY6uE='
+OTHER_TEST_KEY = 'mF0r7tq9nQ2l8gZ1cV6bX3yK5wE4aR0sD7fH2jL9pO8='
+
+
+@override_settings(WALLET_ENCRYPTION_KEYS=[TEST_KEY])
+class PrivateKeyEncryptionTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(email='k@test.com', password='pw')
+
+    def test_private_key_is_encrypted_at_rest(self):
+        a = CryptoAddress(user=self.user, address=USER_ADDR)
+        a.set_private_key('0xdeadbeef')
+        a.save()
+        a.refresh_from_db()
+        self.assertNotIn('deadbeef', a.encrypted_private_key)
+        self.assertEqual(a.get_private_key(), '0xdeadbeef')
+
+    def test_missing_key_raises(self):
+        from django.core.exceptions import ImproperlyConfigured
+        with override_settings(WALLET_ENCRYPTION_KEYS=[]):
+            with self.assertRaises(ImproperlyConfigured):
+                CryptoAddress(user=self.user, address=USER_ADDR).set_private_key('0x1')
+
+    def test_rotation_keeps_old_keys_decryptable(self):
+        from django.core.management import call_command
+        a = CryptoAddress(user=self.user, address=USER_ADDR)
+        a.set_private_key('0xabc')
+        a.save()
+        with override_settings(WALLET_ENCRYPTION_KEYS=[OTHER_TEST_KEY, TEST_KEY]):
+            self.assertEqual(CryptoAddress.objects.get().get_private_key(), '0xabc')
+            call_command('rotate_wallet_keys', stdout=open(os.devnull, 'w'))
+        with override_settings(WALLET_ENCRYPTION_KEYS=[OTHER_TEST_KEY]):
+            self.assertEqual(CryptoAddress.objects.get().get_private_key(), '0xabc')
+
+    def test_admin_never_shows_private_key(self):
+        admin_user = User.objects.create_superuser(email='admin2@test.com', password='pw')
+        self.client.force_login(admin_user)
+        a = CryptoAddress(user=self.user, address=USER_ADDR)
+        a.set_private_key('0xsecretvalue')
+        a.save()
+        for url in [f'/admin/blockchain/cryptoaddress/{a.pk}/change/', f'/admin/account/user/{self.user.pk}/change/']:
+            response = self.client.get(url)
+            self.assertEqual(response.status_code, 200)
+            self.assertNotContains(response, a.encrypted_private_key)
+            self.assertNotContains(response, 'secretvalue')

@@ -21,7 +21,9 @@ class UserAdmin(admin.ModelAdmin):
     def generate_address(modeladmin, request, queryset):        
         for user in queryset:
             address, private_key = generate_address()
-            CryptoAddress.objects.create(user=user, address=address, private_key=private_key)
+            crypto_address = CryptoAddress(user=user, address=address)
+            crypto_address.set_private_key(private_key)
+            crypto_address.save()
         return HttpResponseRedirect(request.get_full_path())
     
     actions = [generate_address]
