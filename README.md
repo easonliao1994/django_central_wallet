@@ -4,7 +4,7 @@
 
 ## Run with Docker
 
-Docker Compose starts PostgreSQL, Redis, a one-shot migration job, the web app (gunicorn), a Celery worker and Celery Beat:
+Docker Compose starts PostgreSQL, Redis, a one-shot migration job, the web app (gunicorn), a Celery worker, Celery Beat and the frontend:
 
 ```
 cp .env.default .env
@@ -14,9 +14,20 @@ docker compose up -d --build
 docker compose exec web python manage.py createsuperuser
 ```
 
-The app listens on port 8000 (`WEB_PORT` to change it). Data lives in the `postgres-data` and `redis-data` volumes. Put a TLS-terminating reverse proxy (nginx, Caddy, a load balancer) in front of it in production.
+The user web app is on port 8080 (`FRONTEND_PORT`); the Django app (API, admin at `/admin/`, Swagger at `/`) is on port 8000 (`WEB_PORT`). Data lives in the `postgres-data` and `redis-data` volumes. Put a TLS-terminating reverse proxy (nginx, Caddy, a load balancer) in front of the frontend in production.
 
 Logs: `docker compose logs -f worker beat web`. One-off commands: `docker compose exec web python manage.py <command>`.
+
+## Frontend
+
+`frontend/` is a React + TypeScript single-page app (Vite) for users: sign up and log in (with the 2FA step), balances, deposit address with QR code, withdrawals, transfers, transaction history, 2FA setup, saved withdrawal addresses, whitelist mode, profile and password. The interface is in Traditional Chinese (default) and English, follows the system light/dark theme, and works on phones.
+
+It talks to the REST API on the same origin with token authentication, so it needs no CORS settings:
+
+- **Docker**: the `frontend` service builds the app and serves it with nginx, which proxies `/account/`, `/blockchain/`, `/admin/`, `/static/` and `/health/` to the web service (`frontend/nginx.conf`) and sends a strict Content-Security-Policy with the app.
+- **Development**: `cd frontend && npm install && npm run dev` serves it on http://localhost:5173 and proxies the API to `VITE_API_PROXY` (default `http://localhost:8000`). `npm test` runs the unit tests, `npm run lint` the linter, `npm run build` type-checks and builds.
+
+For production, point `SITE_URL` at the frontend's public URL and set `PASSWORD_RESET_URL=<frontend>/reset-password?uid={uid}&token={token}` so reset emails open the app. Publish only the frontend port, with `NUM_PROXIES=1` so throttling sees real client IPs, and add the frontend origin to `CSRF_TRUSTED_ORIGINS` to use the admin through it. The API token is kept in the browser's `localStorage`; the CSP blocks third-party scripts, which is the main protection for it.
 
 ## Installation (without Docker)
 
@@ -155,6 +166,7 @@ Example for the Sepolia testnet: RPC URLs `https://ethereum-sepolia-rpc.publicno
 - [x] Internal transfers between users (off-chain, instant, no fee).
 - [x] Sweep deposits to the hot wallet (with gas top-ups and an optional cold wallet).
 - [x] Two-factor authentication for withdrawals and transfers, withdrawal address whitelist.
+- [x] Web frontend for users (React, Traditional Chinese and English).
 
 ## Contributing
 

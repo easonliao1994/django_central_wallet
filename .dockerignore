@@ -13,3 +13,4 @@ staticfiles
 django_central_wallet/settings.py
 .vscode
 .idea
+frontend

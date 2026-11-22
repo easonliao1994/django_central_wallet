@@ -4,7 +4,8 @@
 #   docker compose exec web python manage.py createsuperuser
 #
 # Services: PostgreSQL, Redis, a one-shot migration job, the web app (gunicorn),
-# a Celery worker and Celery Beat (scheduler). Only the web port is published.
+# a Celery worker, Celery Beat (scheduler) and the frontend (nginx serving the React app and
+# proxying the API on the same origin). The web and frontend ports are published.
 
 x-app: &app
   # Built once by the "web" service; the other app services reuse the same image.
@@ -76,6 +77,21 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+
+  frontend:
+    build: ./frontend
+    image: django-central-wallet-frontend:latest
+    pull_policy: build
+    ports:
+      - "${FRONTEND_PORT:-8080}:8080"
+    depends_on:
+      - web
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
 
 volumes:
   postgres-data:

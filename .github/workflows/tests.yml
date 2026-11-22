@@ -72,6 +72,25 @@ jobs:
       - name: Run tests
         run: python manage.py test --verbosity 2
 
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - name: Type-check and build
+        run: npm run build
+
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -81,3 +100,5 @@ jobs:
         run: docker build -t django-central-wallet:ci .
       - name: Django system checks in the image
         run: docker run --rm -e SECRET_KEY=ci-only -e DEBUG=False -e ALLOWED_HOSTS=localhost django-central-wallet:ci python manage.py check --deploy --fail-level ERROR
+      - name: Build frontend image
+        run: docker build -t django-central-wallet-frontend:ci frontend
