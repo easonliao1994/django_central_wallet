@@ -50,26 +50,28 @@ class Blockchain(models.Model):
     def __str__(self):
         return f'{self.name}'
     
-    def get_web3(self, middleware_inject=False):
-        w3 = None
-        rpc_urls = self.rpc_url.splitlines()
-        for rpc_url in rpc_urls:
-            try:
-                w3 = Web3(HTTPProvider(rpc_url)) 
-                if w3.isConnected():
-                    break
-                w3 = None
-            except Exception:
-                w3 = None
-                continue
+    RPC_TIMEOUT = 15  # seconds per JSON-RPC request
 
-        if w3 is None or w3.isConnected() is False:
-            return None
-        
-        from web3.middleware import geth_poa_middleware
-        if middleware_inject:
-            w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-        return w3
+    def get_web3(self, middleware_inject=False):
+        """Web3 connected to the first reachable RPC URL (one per line), or None.
+
+        ``middleware_inject`` adds the proof-of-authority extraData middleware needed by
+        chains such as BSC or Polygon; it is harmless on Ethereum.
+        """
+        for rpc_url in (self.rpc_url or '').splitlines():
+            rpc_url = rpc_url.strip()
+            if not rpc_url:
+                continue
+            try:
+                w3 = Web3(HTTPProvider(rpc_url, request_kwargs={'timeout': self.RPC_TIMEOUT}))
+                if w3.is_connected():
+                    if middleware_inject:
+                        from web3.middleware import ExtraDataToPOAMiddleware
+                        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+                    return w3
+            except Exception as e:
+                logger.warning('%s: RPC endpoint unavailable: %s', self, e)
+        return None
 
     def get_confirm_latest_block_number(self, w3):
         if w3 is None:

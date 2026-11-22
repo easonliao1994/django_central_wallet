@@ -1,8 +1,10 @@
-from web3 import Web3, HTTPProvider
+import logging
 import json
 from django_central_wallet.utils.custom_exception_handler import *
 from decimal import Decimal
 import re
+
+logger = logging.getLogger(__name__)
 
 # 驗證信箱格式
 def isEmailFormatValid(email):
@@ -11,28 +13,8 @@ def isEmailFormatValid(email):
         raise EmailFormatException
 
 # Web3 相關
-def get_web3(blockchain, middleware_inject=False):
-    w3 = None
-    rpc_urls = blockchain.rpc_url.splitlines()
-    for rpc_url in rpc_urls:
-        try:
-            w3 = Web3(HTTPProvider(rpc_url)) 
-            if w3.isConnected():
-                break
-            w3 = None
-        except Exception:
-            w3 = None
-            continue
-
-    if w3 is None or w3.isConnected() is False:
-        return None
-    
-    from web3.middleware import geth_poa_middleware
-    if middleware_inject:
-        w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-    return w3
-
 _ERC20_ABI = None
+
 
 def get_erc20_abi():
     global _ERC20_ABI
@@ -68,7 +50,7 @@ def get_blockchain_real_amount(coin_info, amount: int):
         return '{:.32f}'.format(Decimal(amount) / Decimal(10**coin_info.decimal)) \
             .rstrip('0').rstrip('.')
     except Exception as e:
-        print(e)
+        logger.warning('Cannot convert amount %r for %s: %s', amount, coin_info, e)
         return None
 # IP
 def get_client_ip(request):

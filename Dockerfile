@@ -1,5 +1,5 @@
-# web3 5.x does not support Python 3.11+.
-FROM python:3.10-slim
+# Django 4.1 supports Python up to 3.11.
+FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -8,10 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# web3 5.x still imports pkg_resources, which setuptools 70+ no longer ships by default.
 COPY requirements.txt .
-RUN pip install "setuptools<70" wheel \
-    && pip install -r requirements.txt
+RUN pip install -r requirements.txt
 
 COPY . .
 

@@ -86,7 +86,7 @@ def _sign(tx: dict, private_key: str):
 def _send(w3, s: Sweep, signed) -> bool:
     """Send a signed tx. Errors are only recorded: the tx may still have reached the network."""
     try:
-        w3.eth.send_raw_transaction(signed.rawTransaction)
+        w3.eth.send_raw_transaction(signed.raw_transaction)
         return True
     except Exception as e:
         if 'already known' in str(e).lower():
@@ -99,10 +99,10 @@ def _send(w3, s: Sweep, signed) -> bool:
 # --------------------------------------------------------------------------- candidates
 def sweep_destination(blockchain: Blockchain, coin_info: CoinInfo, hot: HotWallet, w3) -> str:
     """Hot wallet, or the cold wallet once the hot wallet holds at least hot_wallet_limit."""
-    from web3 import Web3
     cold = (blockchain.cold_wallet_address or '').strip()
     if cold and coin_info.hot_wallet_limit and coin_info.hot_wallet_limit > 0:
-        if not Web3.isAddress(cold):
+        from .withdrawals import is_valid_address
+        if not is_valid_address(cold):
             logger.error('%s: cold_wallet_address %r is not a valid address; sweeping to the hot wallet', blockchain, cold)
         elif coin_balance(w3, coin_info, hot.address) >= int(coin_info.hot_wallet_limit):
             return _checksum(cold)
@@ -191,7 +191,7 @@ def _send_topup(s: Sweep, w3, hot: HotWallet, amount: int) -> bool:
         nonce = max(int(w3.eth.get_transaction_count(_checksum(hot.address), 'pending')), hot.next_nonce)
         signed = _sign({'nonce': nonce, 'gasPrice': gas_price, 'chainId': bc.chain_id, 'gas': gas, **call},
                        hot.get_private_key())
-        tx_id = signed.hash.hex().lower()
+        tx_id = _to_hex(signed.hash)
         log = TransactionLog.objects.create(
             tx_id=tx_id, nonce=nonce, blockchain=bc, coin_info=native, direction=TransactionLog.Direction.GAS_TOPUP,
             status=TransactionLog.Status.PENDING, sender_address=hot.address.lower(), recipient_address=address.lower(),
@@ -250,7 +250,7 @@ def _send_sweep(s: Sweep, w3, hot: HotWallet) -> str:
         nonce = int(w3.eth.get_transaction_count(_checksum(address), 'pending'))
         signed = _sign({'nonce': nonce, 'gasPrice': gas_price, 'chainId': bc.chain_id, 'gas': gas, **call},
                        s.crypto_address.get_private_key())
-        tx_id = signed.hash.hex().lower()
+        tx_id = _to_hex(signed.hash)
         log = TransactionLog.objects.create(
             tx_id=tx_id, nonce=nonce, blockchain=bc, coin_info=coin_info, direction=TransactionLog.Direction.SWEEP,
             status=TransactionLog.Status.PENDING, sender_address=address.lower(),
@@ -330,7 +330,7 @@ def _rebroadcast(s: Sweep, leg: str, w3, hot: HotWallet) -> bool:
         key = s.crypto_address.get_private_key()
 
     signed = _sign({'nonce': nonce, 'gasPrice': gas_price, 'chainId': bc.chain_id, 'gas': gas, **call}, key)
-    tx_id = signed.hash.hex().lower()
+    tx_id = _to_hex(signed.hash)
     with transaction.atomic():
         locked = Sweep.objects.select_for_update().get(pk=s.pk)
         if locked.status != s.status or getattr(locked, p + 'tx_id') != getattr(s, p + 'tx_id'):

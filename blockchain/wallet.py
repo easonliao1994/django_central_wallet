@@ -11,8 +11,10 @@ def generate_keypair() -> Tuple[str, str]:
     """Return a new (checksum address, hex private key) pair using eth_account."""
     from eth_account import Account
 
+    from .scanner import _to_hex
+
     account = Account.create()
-    return account.address, account.key.hex()
+    return account.address, _to_hex(account.key)
 
 
 def active_coin_infos():

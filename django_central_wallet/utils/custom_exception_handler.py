@@ -1,6 +1,11 @@
 # custom handler
+import logging
+
 from rest_framework.views import exception_handler
 from rest_framework.exceptions import APIException, ErrorDetail
+
+logger = logging.getLogger(__name__)
+
 
 def custom_exception_handler(exc, context):
     response = exception_handler(exc, context)
@@ -9,7 +14,7 @@ def custom_exception_handler(exc, context):
         if not isinstance(response.data, dict):  # e.g. ValidationError(['...']) carries a list
             response.data = {'errors': response.data}
         response.status_code = 200
-        print(response.data)
+        logger.debug('API error: %s', response.data)
         response.data['success'] = False
         response_default_detail = response.data.pop('detail', None)
         if response_default_detail is not None:
@@ -17,7 +22,7 @@ def custom_exception_handler(exc, context):
                 response.data['error'] = response_default_detail.code
                 response.data['error_content'] = response_default_detail
             except Exception as e:
-                print(f'Exception handler: {e}, {response_default_detail}')
+                logger.debug('Exception handler: %s, %s', e, response_default_detail)
                 response.data['error'] = response_default_detail
     return response
 

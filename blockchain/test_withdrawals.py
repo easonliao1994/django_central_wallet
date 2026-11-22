@@ -229,7 +229,7 @@ class WithdrawalBroadcastTest(WithdrawalTestBase):
         w.refresh_from_db()
         self.assertEqual(w.gas_limit, 248870)
         call = eth.estimated[0]
-        self.assertEqual((call['from'], call['to'], call['value']), (self.hot.address, Web3.toChecksumAddress(DEST), ETH))
+        self.assertEqual((call['from'], call['to'], call['value']), (self.hot.address, Web3.to_checksum_address(DEST), ETH))
 
     def test_gas_limit_never_below_configured_minimum(self):
         from eth_account._utils.legacy_transactions import Transaction

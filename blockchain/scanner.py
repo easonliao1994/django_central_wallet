@@ -208,7 +208,7 @@ class ChainScanner:
         coin_infos = self._token_coin_infos()
         if not coin_infos:
             return []
-        contracts = [Web3.toChecksumAddress(c) for c in coin_infos]
+        contracts = [Web3.to_checksum_address(c) for c in coin_infos]
         deposits = []
         for log in self._get_logs(start, end, contracts):
             if log.get('removed'):
