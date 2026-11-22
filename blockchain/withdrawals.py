@@ -130,7 +130,8 @@ def request_withdrawal(user, coin_info: CoinInfo, to_address: str, amount: int) 
             raise InvalidAddressException()
 
         # Older accounts may have several addresses: debit one that holds enough.
-        balance = CoinInfoBalance.objects.select_for_update().select_related('crypto_address') \
+        # of=('self',): lock only the balance row, not the joined address row.
+        balance = CoinInfoBalance.objects.select_for_update(of=('self',)).select_related('crypto_address') \
             .filter(crypto_address__user=user, coin_info=coin_info) \
             .annotate(total=F('internal_amount') + F('external_amount')) \
             .filter(total__gte=amount).order_by('crypto_address_id').first()
@@ -218,7 +219,8 @@ def broadcast(w: Withdrawal, w3=None) -> bool:
     w3 = _get_w3(bc, w3)
 
     with transaction.atomic():
-        w = Withdrawal.objects.select_for_update().select_related('coin_info__blockchain').get(pk=w.pk)
+        # of=('self',): PostgreSQL refuses FOR UPDATE on the nullable side of an outer join.
+        w = Withdrawal.objects.select_for_update(of=('self',)).select_related('coin_info__blockchain').get(pk=w.pk)
         if w.status != Withdrawal.Status.APPROVED:
             return False
         hot = HotWallet.objects.select_for_update().filter(blockchain=bc).first()

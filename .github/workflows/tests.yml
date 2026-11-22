@@ -15,6 +15,20 @@ jobs:
     timeout-minutes: 15
 
     services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: central_wallet
+          POSTGRES_USER: central_wallet
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U central_wallet -d central_wallet"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
       redis:
         image: redis:7
         ports:
@@ -29,6 +43,11 @@ jobs:
       # Throwaway values for the test run only.
       SECRET_KEY: ci-only-insecure-secret-key
       REDIS_URL: redis://localhost:6379/0
+      # Run against PostgreSQL like production (row locks are real there, unlike SQLite).
+      POSTGRES_HOST: localhost
+      POSTGRES_DB: central_wallet
+      POSTGRES_USER: central_wallet
+      POSTGRES_PASSWORD: ci-only-password
 
     steps:
       - uses: actions/checkout@v4
@@ -52,3 +71,13 @@ jobs:
 
       - name: Run tests
         run: python manage.py test --verbosity 2
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t django-central-wallet:ci .
+      - name: Django system checks in the image
+        run: docker run --rm -e SECRET_KEY=ci-only -e DEBUG=False -e ALLOWED_HOSTS=localhost django-central-wallet:ci python manage.py check --deploy --fail-level ERROR
