@@ -29,8 +29,8 @@ MAX_MEMO_LENGTH = 140
 
 def platform_address(address: str):
     """The CryptoAddress for an on-chain address if it belongs to a platform user, else None."""
-    from web3 import Web3
-    if not isinstance(address, str) or not Web3.isAddress(address.strip()):
+    from .withdrawals import is_valid_address
+    if not isinstance(address, str) or not is_valid_address(address.strip()):
         return None
     return CryptoAddress.objects.filter(address__iexact=address.strip()).select_related('user').first()
 

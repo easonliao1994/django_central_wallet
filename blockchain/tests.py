@@ -369,3 +369,26 @@ class DepositAddressTest(APITestCase):
         response = self.client.get('/blockchain/deposit-address/')
         self.assertFalse(response.json().get('success', True))
         self.assertFalse(CryptoAddress.objects.exists())
+
+
+class GetWeb3Test(TestCase):
+    """Runs the real Blockchain.get_web3 (only the network check is mocked), so import or API
+    breakage in web3.py upgrades is caught; the other tests use fake nodes."""
+
+    def test_returns_connected_web3_with_poa_middleware(self):
+        from web3 import Web3
+
+        chain = Blockchain.objects.create(name='Local', chain_id=1337,
+                                          rpc_url='http://127.0.0.1:1\nhttp://127.0.0.1:2')
+        with mock.patch.object(Web3, 'is_connected', side_effect=[False, True, True]):
+            w3 = chain.get_web3(middleware_inject=True)
+            plain = chain.get_web3()
+        self.assertIsInstance(w3, Web3)
+        self.assertEqual(w3.provider.endpoint_uri, 'http://127.0.0.1:2')  # first one was down
+        self.assertEqual(len(w3.middleware_onion.middleware), len(plain.middleware_onion.middleware) + 1)  # POA
+
+    def test_none_when_no_endpoint_reachable(self):
+        from web3 import Web3
+        chain = Blockchain.objects.create(name='Down', chain_id=1, rpc_url='http://127.0.0.1:1')
+        with mock.patch.object(Web3, 'is_connected', return_value=False):
+            self.assertIsNone(chain.get_web3())

@@ -27,7 +27,7 @@ Safety rules
 import logging
 import math
 from datetime import timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import List, Optional
 
 from django.db import transaction
@@ -49,6 +49,7 @@ STUCK_AFTER = timedelta(minutes=30)
 REBROADCAST_GAS_BUMP = Decimal('1.125')  # nodes require >= 10% bump to replace a pending tx
 MAX_GAS_PRICE_MULTIPLIER = 2  # never rebroadcast above 2x the current network gas price
 GAS_ESTIMATE_MARGIN = Decimal('1.2')  # headroom over eth_estimateGas
+MAX_AMOUNT_DIGITS = 30  # amount columns are DecimalField(max_digits=30)
 
 
 class BroadcastError(Exception):
@@ -64,25 +65,47 @@ def parse_amount(coin_info: CoinInfo, amount) -> int:
         raise InvalidAmountException()
     if not value.is_finite() or value <= 0:
         raise InvalidAmountException()
-    raw = value * (Decimal(10) ** coin_info.decimal)
-    if raw != raw.to_integral_value():
-        raise InvalidAmountException()  # more decimals than the token supports
-    return int(raw)
+    # Exact arithmetic: the default 28-digit context would silently round large amounts
+    # (e.g. 123456789012.123456789012345678 with 18 decimals came out 22 wei higher).
+    with localcontext() as ctx:
+        ctx.prec = 100
+        if value.adjusted() > MAX_AMOUNT_DIGITS:
+            raise InvalidAmountException()
+        raw = value.scaleb(int(coin_info.decimal))
+        if raw != raw.to_integral_value():
+            raise InvalidAmountException()  # more decimals than the token supports
+        raw = int(raw)
+    if raw >= 10 ** MAX_AMOUNT_DIGITS:
+        raise InvalidAmountException()  # does not fit the 30-digit amount columns
+    return raw
+
+
+def is_valid_address(address) -> bool:
+    """A 20-byte hex address; if it is mixed case, its EIP-55 checksum must be right (catches typos).
+
+    web3.py 7 / eth-utils 6 ``is_address`` no longer checks the checksum of mixed-case addresses.
+    """
+    from web3 import Web3
+    # eth-utils also accepts 40 hex digits without 0x; require the prefix so every address is
+    # stored and compared in one form (an unprefixed platform address would not be recognised).
+    if not isinstance(address, str) or not address.startswith('0x') or not Web3.is_address(address):
+        return False
+    body = address[2:]
+    if body.lower() == body or body.upper() == body:
+        return True
+    return Web3.is_checksum_address(address)
 
 
 def _checksum(address: str) -> str:
     from web3 import Web3
-    if not isinstance(address, str) or not Web3.isAddress(address):
+    if not is_valid_address(address):
         raise InvalidAddressException()
-    return Web3.toChecksumAddress(address)
+    return Web3.to_checksum_address(address)
 
 
 def _encode_erc20_transfer(to: str, amount: int) -> str:
-    try:
-        from eth_abi import encode as abi_encode
-    except ImportError:  # eth_abi < 4
-        from eth_abi import encode_abi as abi_encode
-    return '0x' + TRANSFER_SELECTOR + abi_encode(['address', 'uint256'], [to, amount]).hex()
+    from eth_abi import encode
+    return '0x' + TRANSFER_SELECTOR + encode(['address', 'uint256'], [to, amount]).hex()
 
 
 def _refund(w: Withdrawal, status: str, reason: str = ''):
@@ -234,7 +257,7 @@ def _sign(tx: dict, hot: HotWallet):
 def _send(w3, w: Withdrawal, signed) -> bool:
     """Send a signed tx. Errors are only recorded: the tx may still have reached the network."""
     try:
-        w3.eth.send_raw_transaction(signed.rawTransaction)
+        w3.eth.send_raw_transaction(signed.raw_transaction)
         return True
     except Exception as e:
         if 'already known' in str(e).lower():
@@ -270,7 +293,7 @@ def broadcast(w: Withdrawal, w3=None) -> bool:
         nonce = max(int(w3.eth.get_transaction_count(_checksum(hot.address), 'pending')), hot.next_nonce)
         gas_price = int(w3.eth.gas_price)
         signed = _sign(_build_tx(w, nonce, gas_price, gas), hot)
-        tx_id = signed.hash.hex().lower()
+        tx_id = _to_hex(signed.hash)
 
         # Persist the hash and nonce before sending so they can never be lost.
         w.tx_id, w.nonce, w.gas_price, w.gas_limit = tx_id, nonce, gas_price, gas
@@ -302,7 +325,7 @@ def rebroadcast(w: Withdrawal, w3=None) -> bool:
         # Same nonce, same gas limit as the original; only the gas price goes up.
         gas = int(w.gas_limit) if w.gas_limit else _min_gas(w)
         signed = _sign(_build_tx(w, int(w.nonce), gas_price, gas), hot)
-        tx_id = signed.hash.hex().lower()
+        tx_id = _to_hex(signed.hash)
         if tx_id != w.tx_id:
             w.previous_tx_ids = list(w.previous_tx_ids or []) + [w.tx_id]
             w.tx_id, w.gas_price = tx_id, gas_price

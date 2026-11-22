@@ -20,7 +20,7 @@ Logs: `docker compose logs -f worker beat web`. One-off commands: `docker compos
 
 ## Installation (without Docker)
 
-Python 3.10 is recommended (web3.py 5.x does not support newer Python versions without patches).
+Python 3.10 or 3.11 (Django 4.1 supports up to 3.11; the test suite also runs on 3.12).
 
 ```
 pip install -r requirements.txt
@@ -99,6 +99,34 @@ python manage.py rotate_wallet_keys
 4. To sweep deposits into the hot wallet, set `sweep_threshold` on each `CoinInfo` (0 = never sweep). Optionally set the chain's `cold_wallet_address` and a coin's `hot_wallet_limit`: once the hot wallet holds that much, sweeps go to the cold wallet instead. Keep some native coin in the hot wallet: it pays the gas top-ups for token sweeps.
 
 Example for the Sepolia testnet: RPC URLs `https://ethereum-sepolia-rpc.publicnode.com` and `https://sepolia.gateway.tenderly.co`, `chain_id` 11155111, explorer `https://sepolia.etherscan.io`. Use an RPC provider whose `eth_getLogs` accepts at least `scan_batch_size` blocks (some public endpoints limit it to 50).
+
+## Architecture
+
+```
+            users (REST API, token auth)                 admins (Django admin)
+                         |                                         |
+   account/  register, login, password reset, profile              |
+   blockchain/views.py  balances, history, deposit address, withdrawals, transfers
+                         |                                         |
+                         v                                         v
+              PostgreSQL: users, CoinInfoBalance (internal + external), TransactionLog,
+                          Withdrawal, Sweep, InternalTransfer, encrypted keys (Fernet)
+                         ^
+                         |  Celery worker, scheduled by Celery Beat (Redis broker + locks)
+   dispatch_chain_jobs (every minute) -----> scan_chain            blockchain/scanner.py
+                                     \----> process_withdrawals   blockchain/withdrawals.py
+                                              (+ in-flight sweeps) blockchain/sweeps.py
+   sweep_deposits (every 10 minutes) -------> start new sweeps     blockchain/sweeps.py
+   reconcile_balances (daily) --------------> compare with chain   blockchain/reconciliation.py
+                         |
+                         v
+              EVM chain via JSON-RPC (web3.py 7): deposits in, withdrawals and sweeps out
+```
+
+- **Balances** live in the database: `external_amount` changes with on-chain deposits and withdrawals, `internal_amount` with off-chain transfers. User funds sit on per-user deposit addresses until swept to the hot wallet, which pays withdrawals.
+- **Keys**: user deposit keys and hot wallet keys are encrypted at rest with `WALLET_ENCRYPTION_KEYS` (`blockchain/key_vault.py`); the cold wallet key is never stored.
+- **Per-chain lock**: withdrawals, gas top-ups and sweeps of a chain run under one Redis lock, because they share the hot wallet nonce.
+- **Code map**: `blockchain/scanner.py` (deposits), `withdrawals.py`, `sweeps.py`, `transfers.py`, `reconciliation.py`, `tasks.py` (Celery), `wallet.py` (addresses and balances), `management/commands/` (manual runs).
 
 ## How it works
 
