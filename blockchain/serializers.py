@@ -84,3 +84,58 @@ class WithdrawalCreateSerializer(serializers.Serializer):
 
     def to_representation(self, instance):
         return WithdrawalSerializer(instance, context=self.context).data
+
+
+class BalanceSerializer(serializers.Serializer):
+    """One coin on one chain. ``balance`` is rounded down to the coin's display scale."""
+    coin_info = serializers.IntegerField(help_text='CoinInfo id (use it to withdraw or filter transactions).')
+    blockchain_id = serializers.IntegerField()
+    blockchain = serializers.CharField()
+    symbol = serializers.CharField()
+    name = serializers.CharField()
+    contract = serializers.CharField(allow_null=True)
+    decimal = serializers.IntegerField()
+    balance = serializers.CharField(help_text="Human readable, rounded down to Coin.scale decimals, e.g. '1.5'.")
+    balance_raw = serializers.CharField(help_text='Exact amount in the smallest on-chain unit.')
+
+
+class TransactionSerializer(serializers.ModelSerializer):
+    blockchain = serializers.CharField(source='blockchain.name', read_only=True, default=None)
+    symbol = serializers.CharField(source='coin_info.coin.symbol', read_only=True, default=None)
+    amount = serializers.CharField(source='amount_str', read_only=True)
+    amount_raw = serializers.SerializerMethodField()
+    from_address = serializers.CharField(source='sender_address', read_only=True)
+    to_address = serializers.CharField(source='recipient_address', read_only=True)
+    tx_url = serializers.SerializerMethodField()
+    withdrawal = serializers.SerializerMethodField()
+    withdrawal_status = serializers.SerializerMethodField()
+
+    def get_amount_raw(self, obj) -> str:
+        return str(int(obj.amount))
+
+    def get_tx_url(self, obj):
+        explorer = obj.blockchain.block_explorer_url if obj.blockchain else None
+        if not explorer or not obj.tx_id:
+            return None
+        return f"{explorer.rstrip('/')}/tx/{obj.tx_id}"
+
+    def _withdrawal(self, obj):
+        try:
+            return obj.withdrawal
+        except Withdrawal.DoesNotExist:
+            return None
+
+    def get_withdrawal(self, obj):
+        w = self._withdrawal(obj)
+        return w.pk if w else None
+
+    def get_withdrawal_status(self, obj):
+        w = self._withdrawal(obj)
+        return w.status if w else None
+
+    class Meta:
+        model = TransactionLog
+        fields = ['id', 'user', 'direction', 'status', 'blockchain_id', 'blockchain', 'coin_info', 'symbol',
+                  'amount', 'amount_raw', 'from_address', 'to_address', 'tx_id', 'tx_url', 'block_number',
+                  'withdrawal', 'withdrawal_status', 'created_at']
+        read_only_fields = fields

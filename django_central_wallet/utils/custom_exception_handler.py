@@ -55,3 +55,6 @@ class DailyLimitExceededException(CustomException):
 
 class WithdrawalNotAllowedException(CustomException):
     default_detail = ErrorDetail('withdrawal_not_allowed', 'withdrawal_not_allowed')
+
+class InvalidFilterException(CustomException):
+    default_detail = ErrorDetail('invalid_filter', 'invalid_filter')

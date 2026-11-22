@@ -67,3 +67,159 @@ class WithdrawalViewSet(AutoPrefetchViewSetMixin, mixins.CreateModelMixin, mixin
         if self.action == 'create':
             return WithdrawalCreateSerializer
         return super().get_serializer_class()
+
+
+# --------------------------------------------------------------------------- balances & history
+def _target_users(request):
+    """Whose data to show: the caller; superusers may pass ?user=<id> or ?user=all (None = everyone)."""
+    from django_central_wallet.utils.custom_exception_handler import InvalidFilterException
+
+    requested = request.query_params.get('user')
+    if not requested or not request.user.is_superuser:
+        return request.user.pk
+    if requested == 'all':
+        return None
+    if not requested.isdigit():
+        raise InvalidFilterException()
+    return int(requested)
+
+
+def _int_param(request, name):
+    from django_central_wallet.utils.custom_exception_handler import InvalidFilterException
+
+    value = request.query_params.get(name)
+    if value in (None, ''):
+        return None
+    if not value.isdigit():
+        raise InvalidFilterException()
+    return int(value)
+
+
+def _time_param(request, name, end_of_day=False):
+    """ISO date or datetime -> (aware datetime, is_bare_date). A bare date means the start of that day,
+    or with ``end_of_day`` the start of the next day (an exclusive upper bound)."""
+    from datetime import datetime, time, timedelta
+
+    from django.utils import timezone
+    from django.utils.dateparse import parse_date, parse_datetime
+
+    from django_central_wallet.utils.custom_exception_handler import InvalidFilterException
+
+    value = request.query_params.get(name)
+    if not value:
+        return None, False
+    try:
+        # Dates first: parse_datetime also accepts a bare date (as midnight).
+        day = parse_date(value)
+        is_date = day is not None
+        if is_date:
+            parsed = datetime.combine(day + timedelta(days=1) if end_of_day else day, time.min)
+        else:
+            parsed = parse_datetime(value)
+            if parsed is None:
+                raise ValueError(value)
+    except ValueError:
+        raise InvalidFilterException()
+    if timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed)
+    return parsed, is_date
+
+
+class BalanceListView(generics.GenericAPIView):
+    """My balance for every coin on every chain.
+
+    Filters: ``blockchain`` (id), ``symbol``. Superusers: ``user=<id>`` or ``user=all`` (platform totals).
+    """
+    serializer_class = BalanceSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+    def get(self, request):
+        from django.db.models import Sum
+
+        from django_central_wallet.utils.global_method import format_amount
+        from rest_framework.response import Response
+
+        user_id = _target_users(request)
+        coin_infos = CoinInfo.objects.filter(coin__isnull=False, blockchain__isnull=False) \
+            .select_related('coin', 'blockchain').order_by('blockchain_id', 'id')
+        blockchain_id = _int_param(request, 'blockchain')
+        if blockchain_id is not None:
+            coin_infos = coin_infos.filter(blockchain_id=blockchain_id)
+        symbol = request.query_params.get('symbol')
+        if symbol:
+            coin_infos = coin_infos.filter(coin__symbol__iexact=symbol)
+
+        balances = CoinInfoBalance.objects.filter(coin_info__in=coin_infos)
+        if user_id is not None:
+            balances = balances.filter(crypto_address__user_id=user_id)
+        totals = {row['coin_info']: int(row['internal'] or 0) + int(row['external'] or 0)
+                  for row in balances.values('coin_info').annotate(internal=Sum('internal_amount'),
+                                                                   external=Sum('external_amount'))}
+        rows = []
+        for ci in coin_infos:
+            raw = totals.get(ci.pk, 0)
+            rows.append({
+                'coin_info': ci.pk, 'blockchain_id': ci.blockchain_id, 'blockchain': ci.blockchain.name,
+                'symbol': ci.coin.symbol, 'name': ci.coin.name, 'contract': ci.contract or None, 'decimal': ci.decimal,
+                'balance': format_amount(raw, ci.decimal, ci.coin.scale), 'balance_raw': str(raw),
+            })
+        return Response(BalanceSerializer(rows, many=True).data)
+
+
+class TransactionViewSet(AutoPrefetchViewSetMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin,
+                         viewsets.GenericViewSet):
+    """My deposits, withdrawals and internal transfers, newest first.
+
+    Filters: ``blockchain`` (id), ``coin_info`` (id), ``symbol``, ``direction`` (comma separated:
+    deposit, withdrawal, internal), ``status``, ``created_after`` / ``created_before`` (ISO date or
+    datetime; a bare ``created_before`` date includes that whole day). Superusers: ``user=<id>`` or
+    ``user=all``; platform-internal records (sweeps, gas top-ups) are only listed for superusers.
+    """
+    serializer_class = TransactionSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = CustomPagination
+    USER_DIRECTIONS = [TransactionLog.Direction.DEPOSIT, TransactionLog.Direction.WITHDRAWAL,
+                       TransactionLog.Direction.INTERNAL]
+
+    def get_queryset(self):
+        from django_central_wallet.utils.custom_exception_handler import InvalidFilterException
+
+        qs = TransactionLog.objects.select_related('blockchain', 'coin_info__coin', 'withdrawal') \
+            .order_by('-created_at', '-id')
+        if getattr(self, 'swagger_fake_view', False):
+            return qs.none()
+        request = self.request
+        user_id = _target_users(request)
+        if user_id is not None:
+            qs = qs.filter(user_id=user_id)
+        if not request.user.is_superuser:
+            qs = qs.filter(direction__in=self.USER_DIRECTIONS)
+        if self.action != 'list':
+            return qs
+
+        for name, field in (('blockchain', 'blockchain_id'), ('coin_info', 'coin_info_id')):
+            value = _int_param(request, name)
+            if value is not None:
+                qs = qs.filter(**{field: value})
+        symbol = request.query_params.get('symbol')
+        if symbol:
+            qs = qs.filter(coin_info__coin__symbol__iexact=symbol)
+        direction = request.query_params.get('direction')
+        if direction:
+            wanted = [d.strip() for d in direction.split(',') if d.strip()]
+            if any(d not in TransactionLog.Direction.values for d in wanted):
+                raise InvalidFilterException()
+            qs = qs.filter(direction__in=wanted)
+        status_param = request.query_params.get('status')
+        if status_param:
+            if status_param not in TransactionLog.Status.values:
+                raise InvalidFilterException()
+            qs = qs.filter(status=status_param)
+        after, _ = _time_param(request, 'created_after')
+        before, before_is_date = _time_param(request, 'created_before', end_of_day=True)
+        if after is not None:
+            qs = qs.filter(created_at__gte=after)
+        if before is not None:
+            qs = qs.filter(created_at__lt=before) if before_is_date else qs.filter(created_at__lte=before)
+        return qs

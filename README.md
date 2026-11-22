@@ -40,7 +40,7 @@ Edit `.env`:
 
 Then run `python manage.py migrate`.
 
-Use PostgreSQL in production: balance and nonce handling rely on row locks (`select_for_update`), which SQLite ignores.
+Use PostgreSQL in production: balance and nonce handling rely on row locks (`select_for_update`), which SQLite ignores, and Django reads SQLite decimals with only 15 significant digits, so large amounts in wei are rounded there.
 
 ## Usage
 
@@ -49,6 +49,17 @@ python manage.py runserver
 ```
 
 Visit `http://localhost:8000/admin` for the admin site and `http://localhost:8000/` for the API docs (Swagger).
+
+### User API (token or session auth)
+
+| Endpoint | Description |
+|---|---|
+| `GET /blockchain/deposit-address/` | My deposit address (verified users) |
+| `GET /blockchain/balances/` | My balance per chain and coin. `balance` is rounded down to the coin's `scale`; `balance_raw` is exact. Filters: `blockchain`, `symbol` |
+| `GET /blockchain/transactions/` | My deposits, withdrawals and internal transfers, newest first, paginated (`page`, `page_size`). Filters: `blockchain`, `coin_info`, `symbol`, `direction` (comma separated), `status`, `created_after`, `created_before` (ISO date or datetime) |
+| `GET/POST /blockchain/withdrawals/` | Request and track withdrawals |
+
+Users only see their own data. Superusers can add `user=<id>`, or `user=all` (platform totals for balances; every record, including sweeps and gas top-ups, for transactions).
 
 ### Background jobs
 
