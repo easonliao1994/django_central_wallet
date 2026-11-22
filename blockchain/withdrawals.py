@@ -48,6 +48,7 @@ TRANSFER_SELECTOR = 'a9059cbb'  # transfer(address,uint256)
 STUCK_AFTER = timedelta(minutes=30)
 REBROADCAST_GAS_BUMP = Decimal('1.125')  # nodes require >= 10% bump to replace a pending tx
 MAX_GAS_PRICE_MULTIPLIER = 2  # never rebroadcast above 2x the current network gas price
+GAS_ESTIMATE_MARGIN = Decimal('1.2')  # headroom over eth_estimateGas
 
 
 class BroadcastError(Exception):
@@ -130,7 +131,8 @@ def request_withdrawal(user, coin_info: CoinInfo, to_address: str, amount: int) 
             raise InvalidAddressException()
 
         # Older accounts may have several addresses: debit one that holds enough.
-        balance = CoinInfoBalance.objects.select_for_update().select_related('crypto_address') \
+        # of=('self',): lock only the balance row, not the joined address row.
+        balance = CoinInfoBalance.objects.select_for_update(of=('self',)).select_related('crypto_address') \
             .filter(crypto_address__user=user, coin_info=coin_info) \
             .annotate(total=F('internal_amount') + F('external_amount')) \
             .filter(total__gte=amount).order_by('crypto_address_id').first()
@@ -181,17 +183,35 @@ def reject(w: Withdrawal, reviewer=None, reason: str = 'Rejected by admin') -> b
 
 
 # --------------------------------------------------------------------------- broadcast
-def _build_tx(w: Withdrawal, nonce: int, gas_price: int) -> dict:
+def _transfer_call(w: Withdrawal) -> dict:
+    """to / value / data of the transfer, shared by gas estimation and signing."""
+    if w.coin_info.contract:
+        return {'to': _checksum(w.coin_info.contract), 'value': 0,
+                'data': _encode_erc20_transfer(_checksum(w.to_address), int(w.amount))}
+    return {'to': _checksum(w.to_address), 'value': int(w.amount)}
+
+
+def _min_gas(w: Withdrawal) -> int:
+    bc = w.coin_info.blockchain
+    return bc.gas_limit_erc20 if w.coin_info.contract else bc.gas_limit
+
+
+def _estimate_gas(w3, w: Withdrawal, sender: str) -> int:
+    """eth_estimateGas plus a margin, never below the chain's configured minimum.
+
+    A fixed limit is not safe: on Sepolia a plain ETH transfer to a never-used
+    address costs ~207k gas (21k to an existing account), so a fixed 21000 limit
+    runs out of gas and the withdrawal fails on-chain.
+    """
+    estimate = int(w3.eth.estimate_gas({'from': _checksum(sender), **_transfer_call(w)}))
+    return max(_min_gas(w), math.ceil(Decimal(estimate) * GAS_ESTIMATE_MARGIN))
+
+
+def _build_tx(w: Withdrawal, nonce: int, gas_price: int, gas: int) -> dict:
     bc = w.coin_info.blockchain
     if not bc.chain_id:
         raise BroadcastError(f'{bc} has no chain_id; refusing to sign without replay protection')
-    tx = {'nonce': nonce, 'gasPrice': gas_price, 'chainId': bc.chain_id}
-    if w.coin_info.contract:
-        tx.update({'to': _checksum(w.coin_info.contract), 'value': 0, 'gas': bc.gas_limit_erc20,
-                   'data': _encode_erc20_transfer(_checksum(w.to_address), int(w.amount))})
-    else:
-        tx.update({'to': _checksum(w.to_address), 'value': int(w.amount), 'gas': bc.gas_limit})
-    return tx
+    return {'nonce': nonce, 'gasPrice': gas_price, 'chainId': bc.chain_id, 'gas': gas, **_transfer_call(w)}
 
 
 def _sign(tx: dict, hot: HotWallet):
@@ -218,20 +238,30 @@ def broadcast(w: Withdrawal, w3=None) -> bool:
     w3 = _get_w3(bc, w3)
 
     with transaction.atomic():
-        w = Withdrawal.objects.select_for_update().select_related('coin_info__blockchain').get(pk=w.pk)
+        # of=('self',): PostgreSQL refuses FOR UPDATE on the nullable side of an outer join.
+        w = Withdrawal.objects.select_for_update(of=('self',)).select_related('coin_info__blockchain').get(pk=w.pk)
         if w.status != Withdrawal.Status.APPROVED:
             return False
         hot = HotWallet.objects.select_for_update().filter(blockchain=bc).first()
         if hot is None:
             raise BroadcastError(f'{bc} has no hot wallet')
 
+        try:
+            gas = _estimate_gas(w3, w, hot.address)
+        except Exception as e:
+            # Nothing is signed and no nonce is used yet: keep it approved and retry on the next run
+            # (e.g. the hot wallet does not hold enough of the token yet).
+            logger.warning('Withdrawal #%s: gas estimation failed, will retry: %s', w.pk, e)
+            Withdrawal.objects.filter(pk=w.pk).update(error_message=f'Gas estimation failed: {e}'[:2000])
+            return False
+
         nonce = max(int(w3.eth.get_transaction_count(_checksum(hot.address), 'pending')), hot.next_nonce)
         gas_price = int(w3.eth.gas_price)
-        signed = _sign(_build_tx(w, nonce, gas_price), hot)
+        signed = _sign(_build_tx(w, nonce, gas_price, gas), hot)
         tx_id = signed.hash.hex().lower()
 
         # Persist the hash and nonce before sending so they can never be lost.
-        w.tx_id, w.nonce, w.gas_price = tx_id, nonce, gas_price
+        w.tx_id, w.nonce, w.gas_price, w.gas_limit = tx_id, nonce, gas_price, gas
         w.status, w.broadcast_at, w.error_message = Withdrawal.Status.BROADCAST, timezone.now(), ''
         w.save()
         TransactionLog.objects.filter(pk=w.transaction_log_id).update(
@@ -257,7 +287,9 @@ def rebroadcast(w: Withdrawal, w3=None) -> bool:
         current = int(w3.eth.gas_price)
         bumped = math.ceil(Decimal(w.gas_price or 0) * REBROADCAST_GAS_BUMP) + 1
         gas_price = max(current, min(bumped, current * MAX_GAS_PRICE_MULTIPLIER))
-        signed = _sign(_build_tx(w, int(w.nonce), gas_price), hot)
+        # Same nonce, same gas limit as the original; only the gas price goes up.
+        gas = int(w.gas_limit) if w.gas_limit else _min_gas(w)
+        signed = _sign(_build_tx(w, int(w.nonce), gas_price, gas), hot)
         tx_id = signed.hash.hex().lower()
         if tx_id != w.tx_id:
             w.previous_tx_ids = list(w.previous_tx_ids or []) + [w.tx_id]

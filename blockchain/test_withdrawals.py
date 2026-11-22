@@ -5,6 +5,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APITestCase
+from web3 import Web3
 from web3.exceptions import TransactionNotFound
 
 from django_central_wallet.utils.custom_exception_handler import (
@@ -24,7 +25,11 @@ ETH = 10 ** 18
 
 
 class FakeEth:
-    def __init__(self, latest=1000, pending_nonce=0, gas_price=10, send_error=None, mined_nonce=0):
+    def __init__(self, latest=1000, pending_nonce=0, gas_price=10, send_error=None, mined_nonce=0,
+                 gas_estimate=21000, estimate_error=None):
+        self.gas_estimate = gas_estimate
+        self.estimate_error = estimate_error
+        self.estimated = []
         self.latest = latest
         self.pending_nonce = pending_nonce
         self.mined_nonce = mined_nonce
@@ -38,6 +43,12 @@ class FakeEth:
 
     def get_transaction_count(self, address, block_identifier='latest'):
         return self.pending_nonce if block_identifier == 'pending' else self.mined_nonce
+
+    def estimate_gas(self, tx):
+        self.estimated.append(tx)
+        if self.estimate_error:
+            raise self.estimate_error
+        return self.gas_estimate
 
     def send_raw_transaction(self, raw):
         if self.send_error:
@@ -205,6 +216,45 @@ class WithdrawalBroadcastTest(WithdrawalTestBase):
         self.assertEqual(tx.gas, self.chain.gas_limit_erc20)
         self.assertEqual(tx.data.hex(), 'a9059cbb' + '0' * 24 + DEST[2:] + f'{2_500_000:064x}')
 
+    def test_gas_limit_is_estimated_per_withdrawal(self):
+        """Sending to a never-used address can cost far more than 21000 gas (seen on Sepolia: ~207k)."""
+        from eth_account._utils.legacy_transactions import Transaction
+        import rlp
+
+        w = self.approved()
+        eth = FakeEth(gas_estimate=207391)
+        self.assertTrue(wd.broadcast(w, FakeWeb3(eth)))
+        tx = rlp.decode(bytes(eth.sent[0]), Transaction)
+        self.assertEqual(tx.gas, 248870)  # ceil(207391 * 1.2)
+        w.refresh_from_db()
+        self.assertEqual(w.gas_limit, 248870)
+        call = eth.estimated[0]
+        self.assertEqual((call['from'], call['to'], call['value']), (self.hot.address, Web3.toChecksumAddress(DEST), ETH))
+
+    def test_gas_limit_never_below_configured_minimum(self):
+        from eth_account._utils.legacy_transactions import Transaction
+        import rlp
+
+        w = self.approved()
+        eth = FakeEth(gas_estimate=1000)
+        wd.broadcast(w, FakeWeb3(eth))
+        self.assertEqual(rlp.decode(bytes(eth.sent[0]), Transaction).gas, self.chain.gas_limit)
+
+    def test_failed_gas_estimate_keeps_withdrawal_approved_without_using_a_nonce(self):
+        w = self.approved(self.usdt, 2_500_000)
+        eth = FakeEth(pending_nonce=4, estimate_error=ValueError('execution reverted: insufficient balance'))
+        self.assertFalse(wd.broadcast(w, FakeWeb3(eth)))
+        w.refresh_from_db()
+        self.assertEqual((w.status, w.nonce, w.tx_id), (Withdrawal.Status.APPROVED, None, None))
+        self.assertIn('Gas estimation failed', w.error_message)
+        self.assertEqual(eth.sent, [])
+        self.hot.refresh_from_db()
+        self.assertEqual(self.hot.next_nonce, 0)
+        # Retried on the next run once estimation works.
+        self.assertTrue(wd.broadcast(w, FakeWeb3(FakeEth(pending_nonce=4))))
+        w.refresh_from_db()
+        self.assertEqual((w.status, w.nonce), (Withdrawal.Status.BROADCAST, 4))
+
     def test_nonce_uses_local_counter_when_node_is_behind(self):
         self.hot.next_nonce = 10
         self.hot.save()
@@ -324,8 +374,9 @@ class WithdrawalBroadcastTest(WithdrawalTestBase):
 
     def test_stuck_then_rebroadcast_with_same_nonce(self):
         w = self.approved()
-        eth = FakeEth(latest=100, pending_nonce=2, gas_price=100)
+        eth = FakeEth(latest=100, pending_nonce=2, gas_price=100, gas_estimate=60000)
         wd.broadcast(w, FakeWeb3(eth))
+        eth.gas_estimate = 30000  # the replacement keeps the original gas limit
         Withdrawal.objects.filter(pk=w.pk).update(broadcast_at=timezone.now() - timedelta(hours=1))
         self.assertEqual(wd.check_broadcast_withdrawals(self.chain, FakeWeb3(eth))['stuck'], 1)
 
@@ -337,6 +388,9 @@ class WithdrawalBroadcastTest(WithdrawalTestBase):
         self.assertGreaterEqual(int(w.gas_price), 113)
         self.assertEqual(w.previous_tx_ids, [first_tx])
         self.assertNotEqual(w.tx_id, first_tx)
+        from eth_account._utils.legacy_transactions import Transaction
+        import rlp
+        self.assertEqual([rlp.decode(bytes(r), Transaction).gas for r in eth.sent], [72000, 72000])
 
         # The original transaction is the one that got mined
         eth.receipts[first_tx] = {'status': 1, 'blockNumber': 90}

@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+venv
+**/__pycache__
+**/*.pyc
+.env
+.env.*
+!.env.default
+db.sqlite3
+db.sqlite3-journal
+staticfiles
+django_central_wallet/settings.py
+.vscode
+.idea

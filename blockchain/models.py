@@ -35,8 +35,8 @@ class Blockchain(models.Model):
     last_block = models.BigIntegerField(default=0, help_text="The last block synced by our server for this blockchain network.")
     last_sync_time = models.DateTimeField(auto_now=True, help_text='The timestamp of the last time our server synced with the blockchain network.')
     confirm_times = models.BigIntegerField(default=30, help_text="The number of confirmations required for a block to be considered final on the blockchain network.")
-    gas_limit = models.PositiveIntegerField(default=21000, help_text='The gas limit for transactions on the blockchain network.')
-    gas_limit_erc20 = models.PositiveIntegerField(default=100000, help_text='The gas limit for ERC20 token transactions on the blockchain network.')
+    gas_limit = models.PositiveIntegerField(default=21000, help_text='Minimum gas limit for native coin withdrawals. The actual limit is estimated per transaction (eth_estimateGas + margin).')
+    gas_limit_erc20 = models.PositiveIntegerField(default=100000, help_text='Minimum gas limit for ERC20 withdrawals. The actual limit is estimated per transaction (eth_estimateGas + margin).')
 
     is_auto_sync = models.BooleanField(default=False, help_text='Set to true to automatically sync the blockchain network with our server.')
     scan_batch_size = models.PositiveIntegerField(default=200, help_text='Maximum number of blocks the chain scanner processes in a single run.')
@@ -256,6 +256,7 @@ class Withdrawal(models.Model):
     previous_tx_ids = models.JSONField(default=list, blank=True, help_text='Hashes of earlier broadcasts replaced by a rebroadcast (same nonce).')
     nonce = models.BigIntegerField(null=True, blank=True)
     gas_price = models.DecimalField(max_digits=30, decimal_places=0, null=True, blank=True)
+    gas_limit = models.PositiveIntegerField(null=True, blank=True, help_text='Gas limit the transaction was signed with.')
     broadcast_at = models.DateTimeField(null=True, blank=True)
     error_message = models.TextField(blank=True, default='')
 
