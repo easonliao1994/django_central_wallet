@@ -45,6 +45,22 @@ def get_erc20_abi():
 def get_erc20_contract(w3, contract_address):
     return w3.eth.contract(address=contract_address, abi=get_erc20_abi())
 
+def format_amount(amount, decimal: int, scale=None) -> str:
+    """Smallest on-chain unit -> human readable string, e.g. (1500000, 6) -> '1.5'.
+
+    With ``scale``, at most that many decimals are kept, always rounding down so a
+    balance is never shown higher than it is.
+    """
+    from decimal import ROUND_DOWN
+    value = Decimal(int(amount)).scaleb(-int(decimal))
+    if scale is not None:
+        value = value.quantize(Decimal(1).scaleb(-int(scale)), rounding=ROUND_DOWN)
+    text = '{:f}'.format(value)
+    if '.' in text:
+        text = text.rstrip('0').rstrip('.')
+    return text if text not in ('', '-0') else '0'
+
+
 def get_blockchain_real_amount(coin_info, amount: int):
     if None in [coin_info, amount]:
         return None
