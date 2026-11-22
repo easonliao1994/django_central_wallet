@@ -356,6 +356,7 @@ class InternalTransfer(models.Model):
     amount = models.DecimalField(max_digits=30, decimal_places=0, help_text='Amount in the smallest on-chain unit.')
     sender_address = models.CharField(max_length=64, help_text="Sender's deposit address whose balance was debited.")
     recipient_address = models.CharField(max_length=64, help_text="Recipient's deposit address whose balance was credited.")
+    recipient_input = models.CharField(max_length=256, blank=True, default='', help_text='What the sender entered as recipient (email or address); shown to the sender.')
     memo = models.CharField(max_length=140, blank=True, default='')
     sender_log = models.OneToOneField(TransactionLog, on_delete=models.SET_NULL, null=True, blank=True, related_name='transfer_as_sender')
     recipient_log = models.OneToOneField(TransactionLog, on_delete=models.SET_NULL, null=True, blank=True, related_name='transfer_as_recipient')

@@ -16,8 +16,8 @@ from django.db import transaction
 from django.db.models import F
 
 from django_central_wallet.utils.custom_exception_handler import (
-    EmailNotVerifiedException, InsufficientBalanceException, InvalidAmountException, RecipientNotFoundException,
-    SelfTransferException,
+    DailyLimitExceededException, EmailNotVerifiedException, InsufficientBalanceException, InvalidAmountException,
+    RecipientNotFoundException, SelfTransferException, WithdrawalNotAllowedException,
 )
 
 from .models import CoinInfo, CoinInfoBalance, CryptoAddress, InternalTransfer, TransactionLog
@@ -50,19 +50,43 @@ def resolve_recipient(to: str):
     raise RecipientNotFoundException()
 
 
+def _max_balance(user, coin_info) -> int:
+    rows = CoinInfoBalance.objects.filter(crypto_address__user=user, coin_info=coin_info) \
+        .values_list('internal_amount', 'external_amount')
+    return max((int(i) + int(e) for i, e in rows), default=0)
+
+
 def transfer(sender, coin_info: CoinInfo, to: str, amount: int, memo: str = '') -> InternalTransfer:
+    """Move ``amount`` from ``sender`` to the user identified by ``to``.
+
+    Outgoing controls shared with withdrawals: the coin's ``withdrawal_enabled`` switch and the
+    daily limit (withdrawals and transfers count together). Transfers are instant, so they are
+    not held for review; use the daily limit to bound what a stolen session could move.
+    """
+    from .withdrawals import _today_total
+
     if not sender.is_verified:
         raise EmailNotVerifiedException()
     if amount <= 0:
         raise InvalidAmountException()
-    if coin_info.coin_id is None or coin_info.blockchain_id is None:
-        raise InvalidAmountException()
+    if coin_info.coin_id is None or coin_info.blockchain_id is None or not coin_info.withdrawal_enabled:
+        raise WithdrawalNotAllowedException()
+    # Balance first: an account without funds cannot use transfers to probe which emails exist.
+    if _max_balance(sender, coin_info) < amount:
+        raise InsufficientBalanceException()
     recipient, recipient_address = resolve_recipient(to)
     if recipient.pk == sender.pk:
         raise SelfTransferException()
     memo = (memo or '').strip()[:MAX_MEMO_LENGTH]
 
     with transaction.atomic():
+        # Serialise this user's outgoing requests so the daily limit cannot be raced past.
+        # NO KEY UPDATE: does not block the foreign-key checks other transfers make on this user
+        # (a plain FOR UPDATE deadlocks opposite transfers A->B / B->A).
+        get_user_model().objects.select_for_update(no_key=True).filter(pk=sender.pk).first()
+        limit = int(coin_info.daily_withdrawal_limit or 0)
+        if limit > 0 and _today_total(sender, coin_info) + amount > limit:
+            raise DailyLimitExceededException()
         recipient_row, _ = CoinInfoBalance.objects.get_or_create(crypto_address=recipient_address, coin_info=coin_info)
         sender_ids = list(CoinInfoBalance.objects.filter(crypto_address__user=sender, coin_info=coin_info)
                           .values_list('pk', flat=True))
@@ -78,15 +102,17 @@ def transfer(sender, coin_info: CoinInfo, to: str, amount: int, memo: str = '') 
         CoinInfoBalance.objects.filter(pk=source.pk).update(internal_amount=F('internal_amount') - amount)
         CoinInfoBalance.objects.filter(pk=recipient_row.pk).update(internal_amount=F('internal_amount') + amount)
 
+        from_address = source.crypto_address.address.lower()
+        to_address = recipient_address.address.lower()
+        # Each side's history only shows its own address: the counterparty's deposit address
+        # would reveal their whole on-chain deposit history.
         common = dict(blockchain_id=coin_info.blockchain_id, coin_info=coin_info,
-                      direction=TransactionLog.Direction.INTERNAL, status=TransactionLog.Status.CONFIRMED,
-                      sender_address=source.crypto_address.address.lower(),
-                      recipient_address=recipient_address.address.lower(), amount=amount)
-        sender_log = TransactionLog.objects.create(user=sender, **common)
-        recipient_log = TransactionLog.objects.create(user=recipient, **common)
+                      direction=TransactionLog.Direction.INTERNAL, status=TransactionLog.Status.CONFIRMED, amount=amount)
+        sender_log = TransactionLog.objects.create(user=sender, sender_address=from_address, **common)
+        recipient_log = TransactionLog.objects.create(user=recipient, recipient_address=to_address, **common)
         t = InternalTransfer.objects.create(
             sender=sender, recipient=recipient, coin_info=coin_info, amount=amount,
-            sender_address=common['sender_address'], recipient_address=common['recipient_address'], memo=memo,
-            sender_log=sender_log, recipient_log=recipient_log)
+            sender_address=from_address, recipient_address=to_address, recipient_input=(to or '').strip()[:256],
+            memo=memo, sender_log=sender_log, recipient_log=recipient_log)
     logger.info('Internal transfer #%s: %s %s from user %s to user %s', t.pk, amount, coin_info, sender.pk, recipient.pk)
     return t

@@ -170,21 +170,30 @@ class InternalTransferSerializer(serializers.ModelSerializer):
     blockchain = serializers.CharField(source='coin_info.blockchain.name', read_only=True)
     symbol = serializers.CharField(source='coin_info.coin.symbol', read_only=True)
     amount = serializers.CharField(source='amount_str', read_only=True)
-    from_address = serializers.CharField(source='sender_address', read_only=True)
-    to_address = serializers.CharField(source='recipient_address', read_only=True)
     flow = serializers.SerializerMethodField(help_text="'out' if I sent it, 'in' if I received it.")
     type = serializers.SerializerMethodField(help_text="Always 'internal_transfer' (lets clients tell it apart from a withdrawal).")
+    to = serializers.SerializerMethodField(help_text='The recipient as I entered it (only for transfers I sent).')
+    my_address = serializers.SerializerMethodField(help_text='My deposit address that was debited or credited.')
+
+    def _is_sender(self, obj):
+        request = self.context.get('request')
+        return request is not None and obj.sender_id == request.user.pk
 
     def get_flow(self, obj):
-        request = self.context.get('request')
-        return 'out' if request is not None and obj.sender_id == request.user.pk else 'in'
+        return 'out' if self._is_sender(obj) else 'in'
 
     def get_type(self, obj):
         return 'internal_transfer'
 
+    def get_to(self, obj):
+        return obj.recipient_input if self._is_sender(obj) else None
+
+    def get_my_address(self, obj):
+        return obj.sender_address if self._is_sender(obj) else obj.recipient_address
+
     class Meta:
         model = InternalTransfer
-        fields = ['id', 'type', 'flow', 'blockchain', 'symbol', 'coin_info', 'amount', 'from_address', 'to_address',
+        fields = ['id', 'type', 'flow', 'blockchain', 'symbol', 'coin_info', 'amount', 'to', 'my_address',
                   'memo', 'created_at']
         read_only_fields = fields
 

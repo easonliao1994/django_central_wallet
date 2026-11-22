@@ -49,8 +49,9 @@ class InternalTransferApiTest(TransferTestBase):
         self.assertEqual(Withdrawal.objects.count(), 0)
 
     def test_transfer_by_platform_address(self):
-        data = self.send(self.bob_addr.address.upper().replace('0X', '0x'))
-        self.assertEqual(data['to_address'], self.bob_addr.address.lower())
+        typed = self.bob_addr.address.upper().replace('0X', '0x')
+        data = self.send(typed)
+        self.assertEqual((data['to'], data['my_address']), (typed, self.alice_addr.address.lower()))
         self.assertEqual(self.balance(self.bob_addr), (12_500_000, 0))
 
     def test_both_users_see_it_in_their_history(self):
@@ -97,6 +98,38 @@ class InternalTransferApiTest(TransferTestBase):
         self.assertEqual(self.balance(older), (-20 * USDC, 50 * USDC))
         self.assertEqual(self.balance(self.alice_addr), (0, 5 * USDC))
 
+    def test_counterparty_address_is_not_revealed(self):
+        """Knowing someone's deposit address would expose their on-chain deposit history."""
+        self.send('bob@test.com')
+        self.client.force_authenticate(self.bob)
+        received = self.client.get('/blockchain/transfers/').json()['results'][0]
+        self.assertEqual((received['to'], received['my_address']), (None, self.bob_addr.address.lower()))
+        bob_tx = self.client.get('/blockchain/transactions/').json()['results'][0]
+        self.assertEqual((bob_tx['from_address'], bob_tx['to_address']), (None, self.bob_addr.address.lower()))
+        self.client.force_authenticate(self.alice)
+        alice_tx = self.client.get('/blockchain/transactions/').json()['results'][0]
+        self.assertEqual((alice_tx['from_address'], alice_tx['to_address']), (self.alice_addr.address.lower(), None))
+        self.assertNotIn(self.bob_addr.address.lower(), str(self.client.get('/blockchain/transfers/').json()))
+
+    def test_balance_is_checked_before_looking_up_the_recipient(self):
+        broke = User.objects.create_user(email='broke@test.com', password='pw', is_verified=True)
+        get_or_create_deposit_address(broke)
+        # Same answer for a registered and an unknown email: no way to probe accounts without funds.
+        self.assertEqual(self.send('bob@test.com', user=broke)['error'], 'insufficient_balance')
+        self.assertEqual(self.send('nobody@test.com', user=broke)['error'], 'insufficient_balance')
+
+    def test_respects_withdrawal_switch_and_daily_limit(self):
+        CoinInfo.objects.filter(pk=self.coin.pk).update(withdrawal_enabled=False)
+        self.assertEqual(self.send('bob@test.com')['error'], 'withdrawal_not_allowed')
+        CoinInfo.objects.filter(pk=self.coin.pk).update(withdrawal_enabled=True, daily_withdrawal_limit=20 * USDC)
+        self.assertEqual(self.send('bob@test.com', amount='15')['type'], 'internal_transfer')
+        self.assertEqual(self.send('bob@test.com', amount='6')['error'], 'daily_limit_exceeded')
+        # Withdrawals and transfers share the daily limit.
+        self.client.force_authenticate(self.alice)
+        data = self.client.post('/blockchain/withdrawals/', {'coin_info': self.coin.pk, 'to_address': '0x' + '44' * 20,
+                                                             'amount': '6'}, format='json').json()
+        self.assertEqual(data['error'], 'daily_limit_exceeded')
+
     def test_received_funds_can_be_sent_on(self):
         self.send('bob@test.com', amount='30')
         data = self.send('alice@test.com', amount='30', user=self.bob)
@@ -119,10 +152,21 @@ class WithdrawalRoutingTest(TransferTestBase):
                                                              'amount': amount}, format='json').json()
 
     def test_withdrawal_to_another_users_address_becomes_internal_transfer(self):
+        CoinInfo.objects.filter(pk=self.coin.pk).update(auto_approve_withdrawal_limit=50 * USDC)
         data = self.withdraw(self.bob_addr.address)
         self.assertEqual((data['type'], data['flow'], data['amount']), ('internal_transfer', 'out', '10'))
         self.assertEqual(Withdrawal.objects.count(), 0)
         self.assertEqual(self.balance(self.bob_addr), (10 * USDC, 0))
+
+    def test_withdrawal_needing_review_is_not_routed(self):
+        """Routing must not bypass review: above the auto-approve limit it stays a normal withdrawal."""
+        CoinInfo.objects.filter(pk=self.coin.pk).update(auto_approve_withdrawal_limit=5 * USDC)
+        data = self.withdraw(self.bob_addr.address, amount='10')
+        self.assertEqual(data['status'], Withdrawal.Status.PENDING_REVIEW)
+        self.assertEqual(InternalTransfer.objects.count(), 0)
+        self.assertEqual(self.balance(self.bob_addr), (0, 0))
+        CoinInfo.objects.filter(pk=self.coin.pk).update(auto_approve_withdrawal_limit=0)  # default: all reviewed
+        self.assertEqual(self.withdraw(self.bob_addr.address, amount='1')['status'], Withdrawal.Status.PENDING_REVIEW)
 
     def test_withdrawal_to_own_address_still_rejected(self):
         self.assertEqual(self.withdraw(self.alice_addr.address)['error'], 'invalid_address')
@@ -174,3 +218,32 @@ class ConcurrentTransferTest(TransactionTestCase):
         internal, external = self.balance(self.alice_addr)
         self.assertEqual(internal + external, 10 * USDC)
         self.assertEqual(self.balance(self.bob_addr), (90 * USDC, 0))
+
+    def test_opposite_transfers_in_parallel_do_not_deadlock(self):
+        import threading
+
+        from django.db import connections
+
+        from .transfers import transfer
+
+        self.set_balance(self.bob_addr, external=100 * USDC)
+        errors = []
+
+        def worker(sender_pk, to):
+            try:
+                transfer(User.objects.get(pk=sender_pk), self.coin, to, 1 * USDC)
+            except Exception as e:
+                errors.append(f'{type(e).__name__}: {e}'[:120])
+            finally:
+                connections.close_all()
+
+        threads = [threading.Thread(target=worker, args=(self.alice.pk, 'bob@test.com') if i % 2 else
+                                    (self.bob.pk, 'alice@test.com')) for i in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        a_int, a_ext = self.balance(self.alice_addr)
+        b_int, b_ext = self.balance(self.bob_addr)
+        self.assertEqual((a_int + a_ext, b_int + b_ext), (100 * USDC, 100 * USDC))

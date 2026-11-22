@@ -69,23 +69,25 @@ class WithdrawalViewSet(AutoPrefetchViewSetMixin, mixins.CreateModelMixin, mixin
         return super().get_serializer_class()
 
     def create(self, request, *args, **kwargs):
-        """A withdrawal to another user's deposit address becomes an internal transfer: instant and free,
-        instead of paying gas to move funds between two of the platform's own addresses."""
+        """A withdrawal to another user's deposit address that would be auto-approved becomes an internal
+        transfer: instant and free instead of paying gas between two platform addresses. Anything that
+        needs review stays a normal withdrawal, so routing never bypasses the withdrawal controls."""
         from rest_framework import status as http_status
         from rest_framework.response import Response
 
         from .transfers import platform_address, transfer
-        from .withdrawals import parse_amount
+        from .withdrawals import parse_amount, would_auto_approve
 
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         target = platform_address(serializer.validated_data['to_address'])
+        coin_info = serializer.validated_data['coin_info']
         if target is not None and target.user_id != request.user.pk:
-            coin_info = serializer.validated_data['coin_info']
-            t = transfer(request.user, coin_info, target.address,
-                         parse_amount(coin_info, serializer.validated_data['amount']))
-            return Response(InternalTransferSerializer(t, context=self.get_serializer_context()).data,
-                            status=http_status.HTTP_201_CREATED)
+            amount = parse_amount(coin_info, serializer.validated_data['amount'])
+            if amount >= coin_info.min_withdrawal_amount and would_auto_approve(request.user, coin_info, amount):
+                t = transfer(request.user, coin_info, serializer.validated_data['to_address'], amount)
+                return Response(InternalTransferSerializer(t, context=self.get_serializer_context()).data,
+                                status=http_status.HTTP_201_CREATED)
         return super().create(request, *args, **kwargs)
 
 
