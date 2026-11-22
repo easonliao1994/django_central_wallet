@@ -1,5 +1,6 @@
 import uuid
 from django.db import models
+from django.db.models.functions import Lower
 from django.contrib.auth.models import AbstractUser, PermissionsMixin
 from .manager import UserManager
 from django.conf import settings
@@ -8,7 +9,18 @@ from django.template.loader import render_to_string
 from django.utils.html import strip_tags
 from rest_framework.authtoken.models import Token
 
-# Create your models here.
+def site_url(path: str, domain: str = None) -> str:
+    """Absolute URL for links in emails. Uses settings.SITE_URL; the request host is only a
+    development fallback (it comes from the Host header, so it must not be trusted in production)."""
+    base = getattr(settings, 'SITE_URL', '')
+    if not base:
+        if not settings.DEBUG:
+            from django.core.exceptions import ImproperlyConfigured
+            raise ImproperlyConfigured('Set SITE_URL: emailed links must not be built from the request Host header')
+        base = ('https://' if settings.HAS_HTTPS else 'http://') + (domain or 'localhost')
+    return base.rstrip('/') + path
+
+
 class User(AbstractUser, PermissionsMixin):
     username = None
     email = models.EmailField(unique=True)
@@ -18,6 +30,11 @@ class User(AbstractUser, PermissionsMixin):
     created_at = models.DateTimeField(auto_now_add=True)
 
     objects = UserManager()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(Lower('email'), name='unique_user_email_case_insensitive'),
+        ]
 
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = []
@@ -34,13 +51,27 @@ class User(AbstractUser, PermissionsMixin):
     def get_user_fullname(self):
         return f"{self.first_name} {self.last_name}"
     
-    def send_verification_mail(self, domain):
-        subject = _(f'DjangoCentralWallet - Email Verification')
-        url = ('https://' if settings.HAS_HTTPS else 'http://') + domain + self.activation_path()
+    def send_verification_mail(self, domain=None):
+        subject = _('DjangoCentralWallet - Email Verification')
+        url = site_url(self.activation_path(), domain)
         html_message = render_to_string('verification_mail.html', {'email': self.email, 'verification_url': url})
-        plain_message = strip_tags(html_message)
-        from_email = settings.DEFAULT_FROM_EMAIL
-        self.email_user(subject, plain_message, from_email, html_message=html_message)
+        self.email_user(subject, strip_tags(html_message), settings.DEFAULT_FROM_EMAIL, html_message=html_message)
+
+    def send_password_reset_mail(self, domain=None):
+        from django.contrib.auth.tokens import default_token_generator
+        from django.utils.encoding import force_bytes
+        from django.utils.http import urlsafe_base64_encode
+
+        uid = urlsafe_base64_encode(force_bytes(self.pk))
+        token = default_token_generator.make_token(self)
+        template = getattr(settings, 'PASSWORD_RESET_URL', '')
+        reset_url = template.format(uid=uid, token=token) if template else None
+        html_message = render_to_string('password_reset_mail.html', {
+            'email': self.email, 'reset_url': reset_url, 'uid': uid, 'token': token,
+            'api_url': site_url('/account/password/reset/', domain),
+        })
+        self.email_user(_('DjangoCentralWallet - Reset your password'), strip_tags(html_message),
+                        settings.DEFAULT_FROM_EMAIL, html_message=html_message)
 
     def activation_path(self):
         from django.urls import reverse

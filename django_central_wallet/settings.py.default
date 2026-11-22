@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 
 from pathlib import Path
 import os
+import sys
 from celery.schedules import crontab
 from dotenv import load_dotenv
 
@@ -31,7 +32,13 @@ SECRET_KEY = os.getenv('SECRET_KEY')
 # The first key encrypts; all keys are tried for decryption (key rotation).
 WALLET_ENCRYPTION_KEYS = [k.strip() for k in os.getenv('WALLET_ENCRYPTION_KEYS', '').split(',') if k.strip()]
 
-HAS_HTTPS = True  # or False, depending on your setup
+# Public base URL used in emailed links (verification, password reset), e.g. https://wallet.example.com.
+# Set it in production: without it links are built from the request's Host header.
+SITE_URL = os.getenv('SITE_URL', '').rstrip('/')
+HAS_HTTPS = os.getenv('HAS_HTTPS', 'True').strip().lower() in ('1', 'true', 'yes', 'on')  # fallback scheme
+# Optional frontend page for password resets; {uid} and {token} are filled in.
+# Without it the email contains the uid and token to submit to /account/password/reset/.
+PASSWORD_RESET_URL = os.getenv('PASSWORD_RESET_URL', '')
 
 
 
@@ -166,10 +173,29 @@ REST_FRAMEWORK = {
     
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 2,
+    # Login, verification and password emails are throttled per client IP.
+    'DEFAULT_THROTTLE_RATES': {
+        'auth': os.getenv('AUTH_THROTTLE_RATE', '20/hour'),  # per client IP
+        'auth_email': os.getenv('AUTH_EMAIL_THROTTLE_RATE', '10/hour'),  # per target email
+    },
+    # Number of trusted reverse proxies in front of the app. 0 = use the connecting IP and ignore
+    # X-Forwarded-For (which clients can forge); set 1 behind one proxy / load balancer.
+    'NUM_PROXIES': int(os.getenv('NUM_PROXIES', '0')),
 }
 
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-DEFAULT_FROM_EMAIL = 'noreply@demo.com'
+# Email: SMTP when EMAIL_HOST is set, otherwise printed to the console (development).
+EMAIL_HOST = os.getenv('EMAIL_HOST', '')
+if EMAIL_HOST:
+    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+    EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
+    EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+    EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+    EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').strip().lower() in ('1', 'true', 'yes', 'on')
+    EMAIL_USE_SSL = os.getenv('EMAIL_USE_SSL', 'False').strip().lower() in ('1', 'true', 'yes', 'on')
+    EMAIL_TIMEOUT = 10
+else:
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@demo.com')
 
 
 # Internationalization
@@ -193,6 +219,11 @@ CACHES = {
         'LOCATION': REDIS_URL,
     }
 }
+if len(sys.argv) > 1 and sys.argv[1] == 'test':
+    # Tests need no Redis: throttles and task locks use an in-process cache.
+    CACHES = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}
+    CELERY_TASK_ALWAYS_EAGER = True  # emails are sent inline in tests
+    SITE_URL = SITE_URL or 'http://testserver'
 
 # Celery
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', REDIS_URL)
