@@ -29,6 +29,18 @@ class User(AbstractUser, PermissionsMixin):
     is_verified = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # Two-factor authentication (TOTP). The secret is encrypted with WALLET_ENCRYPTION_KEYS; it is set
+    # when setup starts and 2FA is on once totp_enabled_at is set.
+    totp_secret = models.TextField(blank=True, default='', editable=False)
+    totp_enabled_at = models.DateTimeField(null=True, blank=True, editable=False)
+    totp_last_step = models.BigIntegerField(null=True, blank=True, editable=False,
+                                            help_text='Time step of the last accepted code (codes are single use).')
+    # Withdrawal address whitelist: turning it off takes effect after WITHDRAWAL_ADDRESS_COOLDOWN_HOURS.
+    withdrawal_whitelist_enabled = models.BooleanField(default=False)
+    whitelist_disable_requested_at = models.DateTimeField(null=True, blank=True)
+    withdrawals_locked_until = models.DateTimeField(
+        null=True, blank=True, help_text='Withdrawals and transfers are blocked until then (set after a password reset or 2FA disabled).')
+
     objects = UserManager()
 
     class Meta:
@@ -46,6 +58,10 @@ class User(AbstractUser, PermissionsMixin):
 
     def __str__(self):
         return self.email
+
+    @property
+    def two_factor_enabled(self) -> bool:
+        return self.totp_enabled_at is not None and bool(self.totp_secret)
     
     @property
     def get_user_fullname(self):
@@ -73,6 +89,11 @@ class User(AbstractUser, PermissionsMixin):
         self.email_user(_('DjangoCentralWallet - Reset your password'), strip_tags(html_message),
                         settings.DEFAULT_FROM_EMAIL, html_message=html_message)
 
+    def send_security_notice(self, subject, lines):
+        html_message = render_to_string('security_notice_mail.html', {'email': self.email, 'lines': lines})
+        self.email_user(f'DjangoCentralWallet - {subject}', strip_tags(html_message), settings.DEFAULT_FROM_EMAIL,
+                        html_message=html_message)
+
     def activation_path(self):
         from django.urls import reverse
         from django.utils.encoding import force_bytes
@@ -94,3 +115,22 @@ class User(AbstractUser, PermissionsMixin):
         if self.is_verified:
             from blockchain.wallet import get_or_create_deposit_address
             get_or_create_deposit_address(self)
+
+
+class WithdrawalAddress(models.Model):
+    """A saved withdrawal address. Usable from ``active_from`` (WITHDRAWAL_ADDRESS_COOLDOWN_HOURS after it
+    was added); when the user's whitelist mode is on, withdrawals can only go to these addresses."""
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='withdrawal_addresses')
+    label = models.CharField(max_length=64, blank=True, default='')
+    address = models.CharField(max_length=64, help_text='EIP-55 checksummed address (valid on every EVM chain).')
+    created_at = models.DateTimeField(auto_now_add=True)
+    active_from = models.DateTimeField()
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'address'], name='unique_withdrawal_address_per_user'),
+        ]
+
+    def __str__(self):
+        return f'{self.user} {self.label or self.address}'

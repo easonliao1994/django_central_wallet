@@ -41,7 +41,6 @@ HAS_HTTPS = os.getenv('HAS_HTTPS', 'True').strip().lower() in ('1', 'true', 'yes
 PASSWORD_RESET_URL = os.getenv('PASSWORD_RESET_URL', '')
 
 
-
 def env_bool(name, default=False):
     return os.getenv(name, str(default)).strip().lower() in ('1', 'true', 'yes', 'on')
 
@@ -55,6 +54,14 @@ DEBUG = env_bool('DEBUG', True)
 
 ALLOWED_HOSTS = env_list('ALLOWED_HOSTS')
 CSRF_TRUSTED_ORIGINS = env_list('CSRF_TRUSTED_ORIGINS')
+
+# Two-factor authentication and outgoing-funds protection (account/two_factor.py).
+REQUIRE_2FA_FOR_WITHDRAWAL = env_bool('REQUIRE_2FA_FOR_WITHDRAWAL', True)  # no withdrawals/transfers without 2FA
+WITHDRAWAL_ADDRESS_COOLDOWN_HOURS = float(os.getenv('WITHDRAWAL_ADDRESS_COOLDOWN_HOURS', '24'))
+SECURITY_CHANGE_COOLDOWN_HOURS = float(os.getenv('SECURITY_CHANGE_COOLDOWN_HOURS', '24'))  # after password reset / 2FA off
+OTP_MAX_FAILURES = int(os.getenv('OTP_MAX_FAILURES', '5'))  # wrong codes per user ...
+OTP_FAILURE_WINDOW = int(os.getenv('OTP_FAILURE_WINDOW', '900'))  # ... within this many seconds
+TOTP_ISSUER = os.getenv('TOTP_ISSUER', 'DjangoCentralWallet')  # name shown in authenticator apps
 
 
 # Application definition

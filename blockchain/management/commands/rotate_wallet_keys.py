@@ -25,6 +25,14 @@ class Command(BaseCommand):
                     row.save(update_fields=['encrypted_private_key'])
                     count += 1
                 counts[model.__name__] = count
+            # 2FA secrets are encrypted with the same keys.
+            from django.contrib.auth import get_user_model
+            User = get_user_model()
+            count = 0
+            for user in User.objects.select_for_update().exclude(totp_secret=''):
+                User.objects.filter(pk=user.pk).update(totp_secret=rotate_secret(user.totp_secret))
+                count += 1
+            counts['2FA secrets'] = count
 
         # Verify everything decrypts with the primary key alone before reporting success.
         from django.conf import settings
@@ -37,6 +45,11 @@ class Command(BaseCommand):
                         decrypt_secret(row.encrypted_private_key)
                     except Exception as e:
                         raise CommandError(f'{model.__name__} #{row.pk} does not decrypt with the primary key: {e}')
+            for user in User.objects.exclude(totp_secret=''):
+                try:
+                    decrypt_secret(user.totp_secret)
+                except Exception as e:
+                    raise CommandError(f'2FA secret of user #{user.pk} does not decrypt with the primary key: {e}')
 
         summary = ', '.join(f'{name}: {n}' for name, n in counts.items())
         self.stdout.write(self.style.SUCCESS(f'Re-encrypted and verified private keys ({summary}).'))

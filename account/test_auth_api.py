@@ -60,13 +60,14 @@ class AuthApiTest(APITestCase):
     def test_login_is_throttled(self):
         from rest_framework.settings import api_settings
         from rest_framework.throttling import ScopedRateThrottle
+        original = ScopedRateThrottle.THROTTLE_RATES  # read at import time, so override_settings alone does nothing
         ScopedRateThrottle.THROTTLE_RATES = api_settings.DEFAULT_THROTTLE_RATES
         try:
             for _ in range(3):
                 self.assertEqual(self.login(password='wrong')['error'], 'invalid_credentials')
             self.assertEqual(self.login()['error'], 'throttled')
         finally:
-            ScopedRateThrottle.THROTTLE_RATES = api_settings.DEFAULT_THROTTLE_RATES
+            ScopedRateThrottle.THROTTLE_RATES = original  # not api_settings: the override is still active here
 
     # ------------------------------------------------------------------ verification
     def test_resend_verification(self):
@@ -191,6 +192,7 @@ class AuthHardeningTest(APITestCase):
         from rest_framework.throttling import ScopedRateThrottle
 
         from account.throttles import EmailRateThrottle
+        originals = EmailRateThrottle.THROTTLE_RATES, ScopedRateThrottle.THROTTLE_RATES
         EmailRateThrottle.THROTTLE_RATES = ScopedRateThrottle.THROTTLE_RATES = api_settings.DEFAULT_THROTTLE_RATES
         try:
             User.objects.create_user(email='t@test.com', password=PASSWORD, is_active=True)
@@ -198,7 +200,7 @@ class AuthHardeningTest(APITestCase):
                                         HTTP_X_FORWARDED_FOR=f'10.0.0.{i}').json()['error'] for i in range(4)]
             self.assertEqual(results, ['invalid_credentials'] * 3 + ['throttled'])
         finally:
-            EmailRateThrottle.THROTTLE_RATES = ScopedRateThrottle.THROTTLE_RATES = api_settings.DEFAULT_THROTTLE_RATES
+            EmailRateThrottle.THROTTLE_RATES, ScopedRateThrottle.THROTTLE_RATES = originals
 
     @override_settings(SITE_URL='', DEBUG=False)
     def test_links_refuse_the_host_header_in_production(self):

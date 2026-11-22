@@ -65,8 +65,19 @@ Visit `http://localhost:8000/admin` for the admin site and `http://localhost:800
 | `GET /blockchain/transactions/` | My deposits, withdrawals and internal transfers, newest first, paginated (`page`, `page_size`). Filters: `blockchain`, `coin_info`, `symbol`, `direction` (comma separated), `status`, `created_after`, `created_before` (ISO date or datetime) |
 | `GET/POST /blockchain/withdrawals/` | Request and track withdrawals. A withdrawal to another user's deposit address becomes an internal transfer |
 | `GET/POST /blockchain/transfers/` | Send coins to another user off-chain (`to` = email or platform address), list transfers I sent or received |
+| `POST /account/2fa/setup/`, `/account/2fa/enable/`, `/account/2fa/disable/` | Two-factor authentication with an authenticator app: setup (password) returns a secret, `otpauth://` URI and QR code; enable with the first code; disable with password + code |
+| `GET/POST /account/withdrawal-addresses/`, `DELETE /account/withdrawal-addresses/<id>/` | Saved withdrawal addresses (adding one needs a 2FA code; usable after a cooldown) |
+| `POST /account/withdrawal-whitelist/` | Whitelist mode on (immediate) or off (2FA code; takes effect after the cooldown) |
 
 Login, verification and password emails are throttled per IP (`AUTH_THROTTLE_RATE`, default `20/hour`) and per target email (`AUTH_EMAIL_THROTTLE_RATE`, `10/hour`); behind a reverse proxy set `NUM_PROXIES=1` so the real client IP is used. These endpoints answer the same way whether or not an account exists, and emails are sent by the Celery worker. Set `SITE_URL` in production: links in emails are built from it rather than from the request's Host header. Configure SMTP with `EMAIL_HOST` and friends (see `.env.default`).
+
+### Protecting outgoing funds
+
+- **2FA is required for withdrawals and transfers** (`REQUIRE_2FA_FOR_WITHDRAWAL`, default `True`): both take an `otp_code`, and accounts without 2FA get `two_factor_required`. Once 2FA is on, login also needs `otp_code`. Codes are single use, a code from the previous or next 30-second step is accepted for clock drift, and after `OTP_MAX_FAILURES` wrong codes within `OTP_FAILURE_WINDOW` seconds every code is refused (`too_many_otp_attempts`). The secret is encrypted with `WALLET_ENCRYPTION_KEYS` (and re-encrypted by `rotate_wallet_keys`). A failed withdrawal does not use up the code.
+- **Whitelist mode** (optional, per user, needs 2FA): withdrawals only go to saved addresses whose cooldown (`WITHDRAWAL_ADDRESS_COOLDOWN_HOURS`, default 24) has passed. Transfers are checked too: the recipient's deposit address must be saved. Turning whitelist mode off takes the same cooldown, so a stolen session cannot switch it off and withdraw at once.
+- **Security cooldown**: after a password reset, or after 2FA is turned off, withdrawals and transfers pause for `SECURITY_CHANGE_COOLDOWN_HOURS` (default 24); the account shows `withdrawals_locked_until`.
+- **Notices**: the user gets an email for every withdrawal and transfer they send, new saved addresses, 2FA changes, password resets and whitelist switch-off requests.
+- **Lost device**: an admin can use the *Reset 2FA* action on the user; it turns 2FA off and starts the security cooldown.
 
 Users only see their own data. Superusers can add `user=<id>`, or `user=all` (platform totals for balances; every record, including sweeps and gas top-ups, for transactions).
 
@@ -143,6 +154,7 @@ Example for the Sepolia testnet: RPC URLs `https://ethereum-sepolia-rpc.publicno
 - [x] Support user withdrawals, including ERC20 tokens.
 - [x] Internal transfers between users (off-chain, instant, no fee).
 - [x] Sweep deposits to the hot wallet (with gas top-ups and an optional cold wallet).
+- [x] Two-factor authentication for withdrawals and transfers, withdrawal address whitelist.
 
 ## Contributing
 

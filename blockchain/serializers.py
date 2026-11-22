@@ -75,6 +75,8 @@ class WithdrawalCreateSerializer(serializers.Serializer):
                                                    help_text='CoinInfo id (chain + coin) to withdraw.')
     to_address = serializers.CharField(max_length=256)
     amount = serializers.CharField(max_length=64, help_text="Human readable amount, e.g. '1.5'.")
+    otp_code = serializers.CharField(required=False, allow_blank=True, max_length=16, write_only=True,
+                                     help_text='6-digit code from the authenticator app (required once 2FA is on).')
 
     def create(self, validated_data):
         from .withdrawals import parse_amount, request_withdrawal
@@ -204,13 +206,16 @@ class InternalTransferCreateSerializer(serializers.Serializer):
     to = serializers.CharField(max_length=256, help_text="Recipient's email or platform deposit address.")
     amount = serializers.CharField(max_length=64, help_text="Human readable amount, e.g. '1.5'.")
     memo = serializers.CharField(max_length=140, required=False, allow_blank=True, default='')
+    otp_code = serializers.CharField(required=False, allow_blank=True, max_length=16, write_only=True,
+                                     help_text='6-digit code from the authenticator app (required once 2FA is on).')
 
     def create(self, validated_data):
         from .transfers import transfer
         from .withdrawals import parse_amount
         coin_info = validated_data['coin_info']
         return transfer(self.context['request'].user, coin_info, validated_data['to'],
-                        parse_amount(coin_info, validated_data['amount']), validated_data.get('memo', ''))
+                        parse_amount(coin_info, validated_data['amount']), validated_data.get('memo', ''),
+                        allowed_addresses=validated_data.get('allowed_addresses'))
 
     def to_representation(self, instance):
         return InternalTransferSerializer(instance, context=self.context).data

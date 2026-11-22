@@ -65,26 +65,38 @@ class WithdrawalViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
         return super().get_serializer_class()
 
     def create(self, request, *args, **kwargs):
-        """A withdrawal to another user's deposit address that would be auto-approved becomes an internal
+        """Needs a 2FA code once 2FA is on (and 2FA itself when ``REQUIRE_2FA_FOR_WITHDRAWAL`` is set); with
+        whitelist mode on, ``to_address`` must be an active saved address.
+
+        A withdrawal to another user's deposit address that would be auto-approved becomes an internal
         transfer: instant and free instead of paying gas between two platform addresses. Anything that
         needs review stays a normal withdrawal, so routing never bypasses the withdrawal controls."""
+        from django.db import transaction
         from rest_framework import status as http_status
         from rest_framework.response import Response
+
+        from account.two_factor import authorize_outgoing
 
         from .transfers import platform_address, transfer
         from .withdrawals import parse_amount, would_auto_approve
 
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        target = platform_address(serializer.validated_data['to_address'])
-        coin_info = serializer.validated_data['coin_info']
-        if target is not None and target.user_id != request.user.pk:
-            amount = parse_amount(coin_info, serializer.validated_data['amount'])
-            if amount >= coin_info.min_withdrawal_amount and would_auto_approve(request.user, coin_info, amount):
-                t = transfer(request.user, coin_info, serializer.validated_data['to_address'], amount)
-                return Response(InternalTransferSerializer(t, context=self.get_serializer_context()).data,
-                                status=http_status.HTTP_201_CREATED)
-        return super().create(request, *args, **kwargs)
+        data = serializer.validated_data
+        coin_info = data['coin_info']
+        with transaction.atomic():  # a failed withdrawal does not use up the 2FA code
+            allowed = authorize_outgoing(request.user, data.pop('otp_code', None), to_address=data['to_address'])
+            target = platform_address(data['to_address'])
+            if target is not None and target.user_id != request.user.pk:
+                amount = parse_amount(coin_info, data['amount'])
+                if amount >= coin_info.min_withdrawal_amount and would_auto_approve(request.user, coin_info, amount):
+                    t = transfer(request.user, coin_info, data['to_address'], amount, allowed_addresses=allowed)
+                    _notify_sent(request.user, t)
+                    return Response(InternalTransferSerializer(t, context=self.get_serializer_context()).data,
+                                    status=http_status.HTTP_201_CREATED)
+            w = serializer.save()
+            _notify_sent(request.user, w)
+        return Response(serializer.data, status=http_status.HTTP_201_CREATED)
 
 
 # --------------------------------------------------------------------------- balances & history
@@ -263,3 +275,34 @@ class InternalTransferViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
         if self.action == 'create':
             return InternalTransferCreateSerializer
         return super().get_serializer_class()
+
+    def create(self, request, *args, **kwargs):
+        """Needs a 2FA code once 2FA is on (and 2FA itself when ``REQUIRE_2FA_FOR_WITHDRAWAL`` is set); with
+        whitelist mode on, the recipient's deposit address must be an active saved address."""
+        from django.db import transaction
+        from rest_framework import status as http_status
+        from rest_framework.response import Response
+
+        from account.two_factor import authorize_outgoing
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        with transaction.atomic():  # a failed transfer does not use up the 2FA code
+            allowed = authorize_outgoing(request.user, serializer.validated_data.pop('otp_code', None))
+            t = serializer.save(allowed_addresses=allowed)
+            _notify_sent(request.user, t)
+        return Response(serializer.data, status=http_status.HTTP_201_CREATED)
+
+
+def _notify_sent(user, obj):
+    """Email the user about every withdrawal and transfer they send (after the transaction commits)."""
+    from account.views import notify
+    coin = f'{obj.amount_str} {obj.coin_info.coin.symbol} on {obj.coin_info.blockchain.name}'
+    if isinstance(obj, Withdrawal):
+        notify(user, 'Withdrawal requested', [
+            f'A withdrawal of {coin} to {obj.to_address} was requested from your account.',
+            'If this was not you, change your password and contact support immediately.'])
+    else:
+        notify(user, 'Transfer sent', [
+            f'You sent {coin} to {obj.recipient_input or "another user"}.',
+            'If this was not you, change your password and contact support immediately.'])
