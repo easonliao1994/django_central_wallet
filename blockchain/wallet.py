@@ -49,12 +49,16 @@ def create_deposit_address(user) -> CryptoAddress:
 def get_or_create_deposit_address(user) -> CryptoAddress:
     """Return the user's deposit address, creating it (and its balances) if needed.
 
-    The user row is locked so concurrent calls cannot create two addresses.
+    The user row is locked only when an address has to be created, so concurrent calls cannot
+    create two addresses. It is not locked otherwise: holding it while touching balance rows
+    would deadlock with transfers, which lock balance rows and then reference the user.
     """
-    with transaction.atomic():
-        get_user_model().objects.select_for_update().filter(pk=user.pk).first()
-        existing = CryptoAddress.objects.filter(user=user).order_by('id').first()
-        if existing is not None:
-            ensure_balances(existing)
-            return existing
-        return create_deposit_address(user)
+    existing = CryptoAddress.objects.filter(user=user).order_by('id').first()
+    if existing is None:
+        with transaction.atomic():
+            get_user_model().objects.select_for_update().filter(pk=user.pk).first()
+            existing = CryptoAddress.objects.filter(user=user).order_by('id').first()
+            if existing is None:
+                return create_deposit_address(user)
+    ensure_balances(existing)
+    return existing

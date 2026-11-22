@@ -63,7 +63,8 @@ Visit `http://localhost:8000/admin` for the admin site and `http://localhost:800
 | `GET /blockchain/deposit-address/` | My deposit address (verified users) |
 | `GET /blockchain/balances/` | My balance per chain and coin. `balance` is rounded down to the coin's `scale`; `balance_raw` is exact. Filters: `blockchain`, `symbol` |
 | `GET /blockchain/transactions/` | My deposits, withdrawals and internal transfers, newest first, paginated (`page`, `page_size`). Filters: `blockchain`, `coin_info`, `symbol`, `direction` (comma separated), `status`, `created_after`, `created_before` (ISO date or datetime) |
-| `GET/POST /blockchain/withdrawals/` | Request and track withdrawals |
+| `GET/POST /blockchain/withdrawals/` | Request and track withdrawals. A withdrawal to another user's deposit address becomes an internal transfer |
+| `GET/POST /blockchain/transfers/` | Send coins to another user off-chain (`to` = email or platform address), list transfers I sent or received |
 
 Login, verification and password emails are throttled per IP (`AUTH_THROTTLE_RATE`, default `20/hour`) and per target email (`AUTH_EMAIL_THROTTLE_RATE`, `10/hour`); behind a reverse proxy set `NUM_PROXIES=1` so the real client IP is used. These endpoints answer the same way whether or not an account exists, and emails are sent by the Celery worker. Set `SITE_URL` in production: links in emails are built from it rather than from the request's Host header. Configure SMTP with `EMAIL_HOST` and friends (see `.env.default`).
 
@@ -104,6 +105,7 @@ Example for the Sepolia testnet: RPC URLs `https://ethereum-sepolia-rpc.publicno
 - **Deposits**: ERC20 deposits are detected from `Transfer` event logs (`eth_getLogs`), so reverted transfers are never credited and `transferFrom`/multisend deposits are included. Native coin deposits are found by reading blocks and are credited only when the receipt status is 1. Only blocks with `confirm_times` confirmations (or the `finalized` tag) are processed, and a unique constraint on `(blockchain, tx_id, log_index)` makes rescans safe.
 - **Withdrawals**: the balance is debited when requested; approved withdrawals are signed by the chain's hot wallet and confirmed by polling the transaction receipt. The gas limit is estimated per withdrawal (`eth_estimateGas` + 20%, never below the chain's `gas_limit`), because a fixed 21000 is not enough everywhere: on Sepolia, sending ETH to a never-used address costs about 207k gas. A withdrawal keeps its nonce once signed, so it can be paid at most once even when the RPC node returns errors; stuck ones are rebroadcast with the same nonce. Reverted withdrawals, and ones rejected before signing, are refunded.
 - **Sweeps**: every 10 minutes, deposit addresses holding at least a coin's `sweep_threshold` are swept to the hot wallet (or the cold wallet once the hot wallet is above `hot_wallet_limit`). Native coin is swept minus the gas fee. A token sweep needs native coin for gas, so if the address has none the hot wallet first sends a gas top-up, and the sweep is signed once that is mined. Both transactions keep their nonce and are rebroadcast with the same nonce if they get stuck. A top-up is only sent when the hot wallet can pay it, so it never leaves a nonce gap that would block withdrawals. Gas top-ups are recognised by transaction hash and never credited as deposits, and sweeps never change users' platform balances. Not supported yet: chains with an extra L1 data fee (OP-stack L2s), since the native sweep amount does not account for it.
+- **Internal transfers**: off-chain; only `CoinInfoBalance.internal_amount` changes (the sender's may go negative, the checked figure is `internal + external`). The balance rows involved are locked in primary-key order in one transaction, so balances cannot be overdrawn by concurrent requests, and both users get a `TransactionLog` (`direction=internal`, with an `in`/`out` `flow`).
 - **Reconciliation**: a daily job compares each deposit address's on-chain balance with the transaction log (deposits + gas top-ups received - sweeps - gas fees paid) and logs mismatches.
 
 ## Features
@@ -111,7 +113,7 @@ Example for the Sepolia testnet: RPC URLs `https://ethereum-sepolia-rpc.publicno
 - [x] Generate Ethereum addresses for users.
 - [x] Support user deposits, including ERC20 tokens.
 - [x] Support user withdrawals, including ERC20 tokens.
-- [ ] Internal transfers between users.
+- [x] Internal transfers between users (off-chain, instant, no fee).
 - [x] Sweep deposits to the hot wallet (with gas top-ups and an optional cold wallet).
 
 ## Contributing

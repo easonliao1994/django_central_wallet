@@ -68,6 +68,28 @@ class WithdrawalViewSet(AutoPrefetchViewSetMixin, mixins.CreateModelMixin, mixin
             return WithdrawalCreateSerializer
         return super().get_serializer_class()
 
+    def create(self, request, *args, **kwargs):
+        """A withdrawal to another user's deposit address that would be auto-approved becomes an internal
+        transfer: instant and free instead of paying gas between two platform addresses. Anything that
+        needs review stays a normal withdrawal, so routing never bypasses the withdrawal controls."""
+        from rest_framework import status as http_status
+        from rest_framework.response import Response
+
+        from .transfers import platform_address, transfer
+        from .withdrawals import parse_amount, would_auto_approve
+
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        target = platform_address(serializer.validated_data['to_address'])
+        coin_info = serializer.validated_data['coin_info']
+        if target is not None and target.user_id != request.user.pk:
+            amount = parse_amount(coin_info, serializer.validated_data['amount'])
+            if amount >= coin_info.min_withdrawal_amount and would_auto_approve(request.user, coin_info, amount):
+                t = transfer(request.user, coin_info, serializer.validated_data['to_address'], amount)
+                return Response(InternalTransferSerializer(t, context=self.get_serializer_context()).data,
+                                status=http_status.HTTP_201_CREATED)
+        return super().create(request, *args, **kwargs)
+
 
 # --------------------------------------------------------------------------- balances & history
 def _target_users(request):
@@ -185,7 +207,8 @@ class TransactionViewSet(AutoPrefetchViewSetMixin, mixins.ListModelMixin, mixins
     def get_queryset(self):
         from django_central_wallet.utils.custom_exception_handler import InvalidFilterException
 
-        qs = TransactionLog.objects.select_related('blockchain', 'coin_info__coin', 'withdrawal') \
+        qs = TransactionLog.objects.select_related('blockchain', 'coin_info__coin', 'withdrawal',
+                                                   'transfer_as_sender', 'transfer_as_recipient') \
             .order_by('-created_at', '-id')
         if getattr(self, 'swagger_fake_view', False):
             return qs.none()
@@ -223,3 +246,24 @@ class TransactionViewSet(AutoPrefetchViewSetMixin, mixins.ListModelMixin, mixins
         if before is not None:
             qs = qs.filter(created_at__lt=before) if before_is_date else qs.filter(created_at__lte=before)
         return qs
+
+
+class InternalTransferViewSet(AutoPrefetchViewSetMixin, mixins.CreateModelMixin, mixins.ListModelMixin,
+                              mixins.RetrieveModelMixin, viewsets.GenericViewSet):
+    """Send coins to another user off-chain (by email or platform address), and list transfers I sent or received."""
+    serializer_class = InternalTransferSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = CustomPagination
+
+    def get_queryset(self):
+        from django.db.models import Q
+        qs = InternalTransfer.objects.select_related('coin_info__blockchain', 'coin_info__coin')
+        if getattr(self, 'swagger_fake_view', False):
+            return qs.none()
+        user = self.request.user
+        return qs.filter(Q(sender=user) | Q(recipient=user))
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return InternalTransferCreateSerializer
+        return super().get_serializer_class()

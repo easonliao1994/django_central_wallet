@@ -244,3 +244,18 @@ class SweepAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+@admin.register(InternalTransfer)
+class InternalTransferAdmin(admin.ModelAdmin):
+    """Read-only: transfers are made through the API."""
+    list_display = ('id', 'sender', 'recipient', 'coin_info', 'amount', 'created_at')
+    search_fields = ('sender__email', 'recipient__email', 'sender_address', 'recipient_address')
+    raw_id_fields = ('sender', 'recipient', 'sender_log', 'recipient_log')
+    readonly_fields = [f.name for f in InternalTransfer._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

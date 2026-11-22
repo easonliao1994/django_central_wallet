@@ -72,3 +72,9 @@ class AccountDisabledException(CustomException):
 
 class InvalidTokenException(CustomException):
     default_detail = ErrorDetail('invalid_token', 'invalid_token')
+
+class RecipientNotFoundException(CustomException):
+    default_detail = ErrorDetail('recipient_not_found', 'recipient_not_found')
+
+class SelfTransferException(CustomException):
+    default_detail = ErrorDetail('cannot_transfer_to_self', 'cannot_transfer_to_self')

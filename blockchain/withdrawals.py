@@ -106,10 +106,22 @@ def _get_w3(blockchain, w3):
 
 
 def _today_total(user, coin_info) -> int:
-    return Withdrawal.objects.filter(
-        user=user, coin_info=coin_info, created_at__date=timezone.localdate(),
-    ).exclude(status__in=[Withdrawal.Status.REJECTED, Withdrawal.Status.FAILED]) \
+    """Everything the user sent out today: withdrawals (not rejected/failed) and internal transfers.
+    Daily limits and the auto-approve threshold apply to this total."""
+    from .models import InternalTransfer
+    today = timezone.localdate()
+    withdrawn = Withdrawal.objects.filter(user=user, coin_info=coin_info, created_at__date=today) \
+        .exclude(status__in=[Withdrawal.Status.REJECTED, Withdrawal.Status.FAILED]) \
         .aggregate(s=Sum('amount'))['s'] or 0
+    transferred = InternalTransfer.objects.filter(sender=user, coin_info=coin_info, created_at__date=today) \
+        .aggregate(s=Sum('amount'))['s'] or 0
+    return int(withdrawn) + int(transferred)
+
+
+def would_auto_approve(user, coin_info, amount: int) -> bool:
+    """True if a withdrawal of this amount would skip admin review."""
+    limit = int(coin_info.auto_approve_withdrawal_limit or 0)
+    return limit > 0 and _today_total(user, coin_info) + amount <= limit
 
 
 # --------------------------------------------------------------------------- request
