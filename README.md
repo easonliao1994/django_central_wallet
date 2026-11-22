@@ -20,7 +20,7 @@ Logs: `docker compose logs -f worker beat web`. One-off commands: `docker compos
 
 ## Installation (without Docker)
 
-Python 3.10 or 3.11 (Django 4.1 supports up to 3.11; the test suite also runs on 3.12).
+Python 3.10 to 3.13 (the project runs on Django 5.2 LTS, supported until April 2028). Docker and CI use Python 3.12.
 
 ```
 pip install -r requirements.txt

@@ -1,6 +1,7 @@
 from django import forms
 from django.contrib import admin, messages
 from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.db import models
 from django.shortcuts import render
 
 from .models import *
@@ -45,7 +46,9 @@ class BlockchainAdmin(admin.ModelAdmin):
         ('is_auto_sync'),
     )
     search_fields = ['name', 'coin__symbol']
-    
+    # Explorer URLs typed without a scheme get https:// (Django 6 default; avoids the 5.x deprecation warning).
+    formfield_overrides = {models.URLField: {'assume_scheme': 'https'}}
+
     def get_actions(self, request):
         actions = super().get_actions(request)
         if 'delete_selected' in actions:
