@@ -2,7 +2,23 @@
 
 `django_central_wallet` is a centralized wallet project based on the Django framework. It provides a web interface for managing cryptocurrencies, allowing users to deposit, withdraw, and transfer their digital assets.
 
-## Installation
+## Run with Docker
+
+Docker Compose starts PostgreSQL, Redis, a one-shot migration job, the web app (gunicorn), a Celery worker and Celery Beat:
+
+```
+cp .env.default .env
+# fill in SECRET_KEY, WALLET_ENCRYPTION_KEYS and POSTGRES_PASSWORD; for production also
+# set DEBUG=False, ALLOWED_HOSTS and CSRF_TRUSTED_ORIGINS
+docker compose up -d --build
+docker compose exec web python manage.py createsuperuser
+```
+
+The app listens on port 8000 (`WEB_PORT` to change it). Data lives in the `postgres-data` and `redis-data` volumes. Put a TLS-terminating reverse proxy (nginx, Caddy, a load balancer) in front of it in production.
+
+Logs: `docker compose logs -f worker beat web`. One-off commands: `docker compose exec web python manage.py <command>`.
+
+## Installation (without Docker)
 
 Python 3.10 is recommended (web3.py 5.x does not support newer Python versions without patches).
 
@@ -19,6 +35,8 @@ Edit `.env`:
   `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
   Never commit it, and back it up: without it the private keys cannot be decrypted.
 - `REDIS_URL`: Redis for Celery and task locks (default `redis://localhost:6379/0`)
+- `POSTGRES_HOST` / `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD`: PostgreSQL. With `POSTGRES_HOST` empty, SQLite is used.
+- `DEBUG`, `ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`
 
 Then run `python manage.py migrate`.
 
@@ -58,10 +76,12 @@ python manage.py rotate_wallet_keys
 2. Tick `is_auto_sync` to let the scanner pick the chain up. A new chain starts scanning from the current confirmed block.
 3. For withdrawals, add a `HotWallet` for the chain (the key is generated and encrypted automatically), fund its address, and set the withdrawal limits on each `CoinInfo`. By default every withdrawal needs admin approval.
 
+Example for the Sepolia testnet: RPC URLs `https://ethereum-sepolia-rpc.publicnode.com` and `https://sepolia.gateway.tenderly.co`, `chain_id` 11155111, explorer `https://sepolia.etherscan.io`. Use an RPC provider whose `eth_getLogs` accepts at least `scan_batch_size` blocks (some public endpoints limit it to 50).
+
 ## How it works
 
 - **Deposits**: ERC20 deposits are detected from `Transfer` event logs (`eth_getLogs`), so reverted transfers are never credited and `transferFrom`/multisend deposits are included. Native coin deposits are found by reading blocks and are credited only when the receipt status is 1. Only blocks with `confirm_times` confirmations (or the `finalized` tag) are processed, and a unique constraint on `(blockchain, tx_id, log_index)` makes rescans safe.
-- **Withdrawals**: the balance is debited when requested; approved withdrawals are signed by the chain's hot wallet and confirmed by polling the transaction receipt. A withdrawal keeps its nonce once signed, so it can be paid at most once even when the RPC node returns errors; stuck ones are rebroadcast with the same nonce. Reverted withdrawals, and ones rejected before signing, are refunded.
+- **Withdrawals**: the balance is debited when requested; approved withdrawals are signed by the chain's hot wallet and confirmed by polling the transaction receipt. The gas limit is estimated per withdrawal (`eth_estimateGas` + 20%, never below the chain's `gas_limit`), because a fixed 21000 is not enough everywhere: on Sepolia, sending ETH to a never-used address costs about 207k gas. A withdrawal keeps its nonce once signed, so it can be paid at most once even when the RPC node returns errors; stuck ones are rebroadcast with the same nonce. Reverted withdrawals, and ones rejected before signing, are refunded.
 - **Reconciliation**: a daily job compares on-chain balances with recorded deposits and sweeps and logs mismatches.
 
 ## Features
