@@ -152,6 +152,21 @@ class WithdrawalRequestTest(WithdrawalTestBase):
             wd.request_withdrawal(self.user, self.native, DEST, ETH - 1)
         self.assertEqual(self.balance(self.native), 5 * ETH)
 
+    def test_parse_amount_is_exact(self):
+        self.assertEqual(wd.parse_amount(self.native, '123456789012.123456789012345678'),
+                         123456789012123456789012345678)
+        self.assertEqual(wd.parse_amount(self.usdt, '0.000001'), 1)
+        for bad in ('1e40', '1' * 31, '0.0000000000000000001', '-1', 'NaN', 'abc'):
+            with self.assertRaises(InvalidAmountException, msg=bad):
+                wd.parse_amount(self.native, bad)
+
+    def test_address_needs_0x_prefix(self):
+        self.assertFalse(wd.is_valid_address('44' * 20))
+        self.assertTrue(wd.is_valid_address(DEST))
+        self.assertFalse(wd.is_valid_address('0x' + '44' * 19))
+        with self.assertRaises(InvalidAddressException):
+            wd.request_withdrawal(self.user, self.native, '44' * 20, ETH)
+
     def test_daily_limit(self):
         self.native.daily_withdrawal_limit = 2 * ETH
         self.native.save()

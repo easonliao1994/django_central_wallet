@@ -27,7 +27,7 @@ Safety rules
 import logging
 import math
 from datetime import timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import List, Optional
 
 from django.db import transaction
@@ -49,6 +49,7 @@ STUCK_AFTER = timedelta(minutes=30)
 REBROADCAST_GAS_BUMP = Decimal('1.125')  # nodes require >= 10% bump to replace a pending tx
 MAX_GAS_PRICE_MULTIPLIER = 2  # never rebroadcast above 2x the current network gas price
 GAS_ESTIMATE_MARGIN = Decimal('1.2')  # headroom over eth_estimateGas
+MAX_AMOUNT_DIGITS = 30  # amount columns are DecimalField(max_digits=30)
 
 
 class BroadcastError(Exception):
@@ -64,10 +65,19 @@ def parse_amount(coin_info: CoinInfo, amount) -> int:
         raise InvalidAmountException()
     if not value.is_finite() or value <= 0:
         raise InvalidAmountException()
-    raw = value * (Decimal(10) ** coin_info.decimal)
-    if raw != raw.to_integral_value():
-        raise InvalidAmountException()  # more decimals than the token supports
-    return int(raw)
+    # Exact arithmetic: the default 28-digit context would silently round large amounts
+    # (e.g. 123456789012.123456789012345678 with 18 decimals came out 22 wei higher).
+    with localcontext() as ctx:
+        ctx.prec = 100
+        if value.adjusted() > MAX_AMOUNT_DIGITS:
+            raise InvalidAmountException()
+        raw = value.scaleb(int(coin_info.decimal))
+        if raw != raw.to_integral_value():
+            raise InvalidAmountException()  # more decimals than the token supports
+        raw = int(raw)
+    if raw >= 10 ** MAX_AMOUNT_DIGITS:
+        raise InvalidAmountException()  # does not fit the 30-digit amount columns
+    return raw
 
 
 def is_valid_address(address) -> bool:
@@ -76,7 +86,9 @@ def is_valid_address(address) -> bool:
     web3.py 7 / eth-utils 6 ``is_address`` no longer checks the checksum of mixed-case addresses.
     """
     from web3 import Web3
-    if not isinstance(address, str) or not Web3.is_address(address):
+    # eth-utils also accepts 40 hex digits without 0x; require the prefix so every address is
+    # stored and compared in one form (an unprefixed platform address would not be recognised).
+    if not isinstance(address, str) or not address.startswith('0x') or not Web3.is_address(address):
         return False
     body = address[2:]
     if body.lower() == body or body.upper() == body:
