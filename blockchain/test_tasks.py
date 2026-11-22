@@ -66,8 +66,10 @@ class TaskTest(TestCase):
                            return_value={'confirmed': 1, 'failed': 0, 'stuck': 0, 'requeued': 0}) as c, \
                 mock.patch('blockchain.withdrawals.rebroadcast_stuck', return_value=1) as r, \
                 mock.patch('blockchain.withdrawals.broadcast_approved', return_value=2) as b:
-            self.assertEqual(tasks.process_withdrawals(self.auto.pk),
-                             {'confirmed': 1, 'failed': 0, 'stuck': 0, 'requeued': 0, 'rebroadcast': 1, 'sent': 2})
+            self.assertEqual(tasks.process_withdrawals(self.auto.pk), {
+                'withdrawals': {'confirmed': 1, 'failed': 0, 'stuck': 0, 'requeued': 0, 'rebroadcast': 1, 'sent': 2},
+                'sweeps': {'skipped': 'no hot wallet'},
+            })
         c.assert_called_once()
         r.assert_called_once()
         b.assert_called_once()

@@ -169,7 +169,17 @@ class ChainScanner:
         deposits = self._collect_token_deposits(start, end, addresses)
         if self.blockchain.scan_native:
             deposits += self._collect_native_deposits(start, end, addresses)
-        return deposits
+        # Transfers from the platform's own wallets (e.g. gas top-ups before a token sweep)
+        # are not user deposits.
+        own = self._platform_wallets()
+        return [d for d in deposits if (d.sender_address or '').lower() not in own]
+
+    def _platform_wallets(self) -> set:
+        from .models import HotWallet
+        own = {a.lower() for a in HotWallet.objects.filter(blockchain=self.blockchain).values_list('address', flat=True)}
+        if self.blockchain.cold_wallet_address:
+            own.add(self.blockchain.cold_wallet_address.strip().lower())
+        return own
 
     def _get_logs(self, start: int, end: int, contracts: List[str]) -> list:
         """eth_getLogs, halving the range when the provider rejects it."""

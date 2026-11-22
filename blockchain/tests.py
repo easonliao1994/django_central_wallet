@@ -253,10 +253,8 @@ class ReconciliationTest(TestCase):
 
         eth = FakeEth()
         eth.get_balance = mock.Mock(return_value=7)  # native coin arrived without being recorded
-        token = mock.Mock()
-        token.functions.balanceOf.return_value.call.return_value = 100
-        with mock.patch('django_central_wallet.utils.global_method.get_erc20_contract', return_value=token):
-            found = find_discrepancies(self.chain, w3=FakeWeb3(eth))
+        eth.call = mock.Mock(return_value=(100).to_bytes(32, 'big'))  # token balanceOf matches the deposit
+        found = find_discrepancies(self.chain, w3=FakeWeb3(eth))
 
         self.assertEqual(len(found), 1)
         self.assertEqual((found[0].symbol, found[0].on_chain, found[0].expected), ('ETH', 7, 0))

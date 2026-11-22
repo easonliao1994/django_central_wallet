@@ -42,6 +42,7 @@ class Blockchain(models.Model):
     scan_batch_size = models.PositiveIntegerField(default=200, help_text='Maximum number of blocks the chain scanner processes in a single run.')
     scan_native = models.BooleanField(default=True, help_text='Scan full blocks for native coin deposits. ERC20 deposits are always detected via Transfer logs.')
     use_finalized_block = models.BooleanField(default=False, help_text="Use the node's 'finalized' block tag instead of confirm_times (e.g. Ethereum PoS).")
+    cold_wallet_address = models.CharField(max_length=64, blank=True, default='', help_text='Cold wallet address (its private key is never stored here). Sweeps go here instead of the hot wallet once the hot wallet holds more than a coin\'s hot_wallet_limit.')
     
     class Meta(object):
         unique_together = [("name")]
@@ -98,6 +99,8 @@ class CoinInfo(models.Model):
     min_withdrawal_amount = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Minimum withdrawal amount, in the smallest on-chain unit.')
     daily_withdrawal_limit = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Maximum total withdrawn per user per day, in the smallest on-chain unit. 0 = unlimited.')
     auto_approve_withdrawal_limit = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Withdrawals up to this amount (smallest on-chain unit) skip admin review. 0 = every withdrawal needs review.')
+    sweep_threshold = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Sweep a deposit address to the hot wallet once it holds at least this much (smallest on-chain unit). 0 = never sweep this coin.')
+    hot_wallet_limit = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='When the hot wallet already holds at least this much (smallest on-chain unit), sweep to the chain\'s cold wallet instead. 0 = always sweep to the hot wallet.')
 
     class Meta(object):
         unique_together = [('blockchain', 'coin')]
@@ -176,6 +179,7 @@ class TransactionLog(models.Model):
         WITHDRAWAL = 'withdrawal', 'Withdrawal'
         INTERNAL = 'internal', 'Internal transfer'
         SWEEP = 'sweep', 'Sweep'
+        GAS_TOPUP = 'gas_topup', 'Gas top-up'
 
     class Status(models.TextChoices):
         PENDING = 'pending', 'Pending'
@@ -200,6 +204,7 @@ class TransactionLog(models.Model):
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
     block_number = models.BigIntegerField(null=True, blank=True)
     nonce = models.BigIntegerField(null=True, blank=True)
+    fee = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Native coin paid for gas by sender_address once mined (smallest unit). Recorded for transactions sent from platform addresses.')
 
     class Meta:
         constraints = [
@@ -275,3 +280,68 @@ class Withdrawal(models.Model):
     @property
     def amount_str(self):
         return get_blockchain_real_amount(self.coin_info, self.amount)
+
+
+class Sweep(models.Model):
+    """Moves funds from a user deposit address to the hot (or cold) wallet.
+
+    Token sweeps may first need native coin for gas: the hot wallet sends a gas
+    top-up, and the sweep is signed once that is mined. Both legs keep their
+    nonce once assigned and are rebroadcast with the same nonce when stuck, like
+    withdrawals. Sweeps never change users' platform balances.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending (next: top up gas or send)'
+        TOPPING_UP = 'topping_up', 'Waiting for gas top-up'
+        BROADCAST = 'broadcast', 'Broadcast (waiting for confirmation)'
+        CONFIRMED = 'confirmed', 'Confirmed'
+        FAILED = 'failed', 'Failed'
+        CANCELLED = 'cancelled', 'Cancelled (nothing sent)'
+
+    OPEN_STATUSES = (Status.PENDING, Status.TOPPING_UP, Status.BROADCAST)
+
+    blockchain = models.ForeignKey(Blockchain, on_delete=models.PROTECT, related_name='sweeps')
+    coin_info = models.ForeignKey(CoinInfo, on_delete=models.PROTECT)
+    crypto_address = models.ForeignKey(CryptoAddress, on_delete=models.PROTECT, related_name='sweeps')
+    to_address = models.CharField(max_length=64, help_text='Hot or cold wallet address.')
+    amount = models.DecimalField(max_digits=30, decimal_places=0, null=True, blank=True, help_text='Amount sent (smallest unit); for the native coin the balance minus the gas fee.')
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING, db_index=True)
+    error_message = models.TextField(blank=True, default='')
+
+    # Sweep transaction, signed by the deposit address.
+    tx_id = models.CharField(max_length=256, null=True, blank=True, db_index=True)
+    previous_tx_ids = models.JSONField(default=list, blank=True)
+    nonce = models.BigIntegerField(null=True, blank=True)
+    gas_price = models.DecimalField(max_digits=30, decimal_places=0, null=True, blank=True)
+    gas_limit = models.PositiveIntegerField(null=True, blank=True)
+    broadcast_at = models.DateTimeField(null=True, blank=True)
+    transaction_log = models.OneToOneField(TransactionLog, on_delete=models.SET_NULL, null=True, blank=True, related_name='sweep')
+
+    # Gas top-up transaction, signed by the hot wallet (token sweeps only).
+    topup_tx_id = models.CharField(max_length=256, null=True, blank=True, db_index=True)
+    topup_previous_tx_ids = models.JSONField(default=list, blank=True)
+    topup_nonce = models.BigIntegerField(null=True, blank=True)
+    topup_gas_price = models.DecimalField(max_digits=30, decimal_places=0, null=True, blank=True)
+    topup_gas_limit = models.PositiveIntegerField(null=True, blank=True)
+    topup_amount = models.DecimalField(max_digits=30, decimal_places=0, null=True, blank=True)
+    topup_broadcast_at = models.DateTimeField(null=True, blank=True)
+    topup_count = models.PositiveSmallIntegerField(default=0)
+    topup_log = models.ForeignKey(TransactionLog, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-id']
+        constraints = [
+            # One sweep at a time per address: they share the address nonce and its native balance.
+            models.UniqueConstraint(
+                fields=['crypto_address'],
+                condition=Q(status__in=['pending', 'topping_up', 'broadcast']),
+                name='one_open_sweep_per_address',
+            ),
+        ]
+
+    def __str__(self):
+        return f'Sweep #{self.pk} {self.coin_info} {self.crypto_address.address} -> {self.to_address} ({self.status})'
