@@ -46,7 +46,7 @@ class FakeEth:
     def get_block_number(self):
         return self.latest
 
-    def get_balance(self, address):
+    def get_balance(self, address, block_identifier='latest'):
         return self.balances.get(address.lower(), 0)
 
     def call(self, tx):
@@ -114,6 +114,7 @@ class SweepTestBase(TestCase):
         self.hot.set_private_key(key)
         self.hot.save()
         self.eth = FakeEth()
+        self.eth.balances[self.hot.address.lower()] = 10 * ETH  # pays gas top-ups
         self.w3 = FakeWeb3(self.eth)
 
     def deposit(self, coin_info, amount, n=1):
@@ -163,12 +164,38 @@ class NativeSweepTest(SweepTestBase):
         self.assertEqual(self.sweep()['created'], 0)
         self.assertEqual(self.eth.sent, [])
 
-    def test_cancelled_when_fee_would_leave_less_than_threshold(self):
-        self.deposit(self.native, ETH // 10)
+    def test_not_a_candidate_when_fee_would_leave_less_than_threshold(self):
+        self.deposit(self.native, ETH // 10 + 1000)  # threshold + less than the fee
+        self.assertEqual(self.sweep()['created'], 0)
+        self.assertEqual(Sweep.objects.count(), 0)  # no cancelled sweep recreated every run
+
+    def test_cancelled_when_actual_fee_is_higher_and_not_retried_during_cooldown(self):
+        self.deposit(self.native, ETH // 10 + 300_000)
+        self.eth.gas_estimate = 100_000  # e.g. destination needs more gas than a plain transfer
         result = self.sweep()
         self.assertEqual((result['created'], result['cancelled']), (1, 1))
         self.assertEqual(Sweep.objects.get().status, Sweep.Status.CANCELLED)
         self.assertEqual(self.eth.sent, [])
+        self.assertEqual(self.sweep()['created'], 0)
+        Sweep.objects.update(updated_at=timezone.now() - timedelta(hours=7))
+        self.assertEqual(self.sweep()['created'], 1)
+
+    def test_cancelled_after_too_many_failed_attempts(self):
+        self.deposit(self.native, ETH)
+        self.eth.estimate_error = ValueError('execution reverted')
+        for _ in range(sw.MAX_SEND_ATTEMPTS):
+            self.sweep(start_new=not Sweep.objects.exists())
+        s = Sweep.objects.get()
+        self.assertEqual((s.status, s.send_attempts), (Sweep.Status.CANCELLED, sw.MAX_SEND_ATTEMPTS))
+
+    def test_invalid_cold_wallet_address_falls_back_to_hot_wallet(self):
+        self.chain.cold_wallet_address = 'not-an-address'
+        self.chain.save()
+        self.native.hot_wallet_limit = 1
+        self.native.save()
+        self.deposit(self.native, ETH)
+        self.sweep()
+        self.assertEqual(self.eth.sent[0]['to'], self.hot.address.lower())
 
     def test_sweeps_go_to_cold_wallet_when_hot_wallet_is_full(self):
         self.chain.cold_wallet_address = COLD
@@ -271,6 +298,52 @@ class TokenSweepTest(SweepTestBase):
         # Native: top-up received minus the gas the sweep paid.
         self.assertEqual(expected_balances(self.chain, self.native)[self.addr], needed - 50_000 * GAS_PRICE)
 
+    def test_top_up_not_sent_when_hot_wallet_cannot_pay_it(self):
+        """A rejected top-up would leave a hot wallet nonce gap and block every withdrawal."""
+        self.deposit(self.usdt, 1_000)
+        self.eth.balances[self.hot.address.lower()] = 1000
+        result = self.sweep()
+        self.assertEqual((result['created'], result['topups']), (1, 0))
+        s = Sweep.objects.get()
+        self.assertEqual((s.status, s.send_attempts), (Sweep.Status.PENDING, 1))
+        self.assertIn('Hot wallet', s.error_message)
+        self.assertEqual(self.eth.sent, [])
+        self.hot.refresh_from_db()
+        self.assertEqual(self.hot.next_nonce, 0)
+
+    def test_token_sweep_keeps_gas_headroom_for_a_rebroadcast(self):
+        self.deposit(self.usdt, 1_000)
+        self.eth.balances[self.addr] = 100_000 * GAS_PRICE * 12 // 10  # enough for 1.2x, not 1.5x
+        self.assertEqual(self.sweep()['topups'], 1)
+
+    def test_token_rebroadcast_skipped_when_address_cannot_pay_higher_gas(self):
+        self.deposit(self.usdt, 1_000)
+        self.eth.balances[self.addr] = 100_000 * GAS_PRICE * 15 // 10
+        self.sweep()
+        Sweep.objects.update(broadcast_at=timezone.now() - timedelta(hours=1))
+        self.eth.gas_price = GAS_PRICE * 3
+        self.assertEqual(self.sweep(start_new=False)['rebroadcast'], 0)
+        s = Sweep.objects.get()
+        self.assertEqual((len(self.eth.sent), s.previous_tx_ids, int(s.gas_price)), (1, [], GAS_PRICE))
+        self.assertIn('Not enough gas', s.error_message)
+
+    def test_fee_on_transfer_token_records_amount_actually_moved(self):
+        self.deposit(self.usdt, 1_000)
+        self.eth.balances[self.addr] = 10 ** 9
+        self.sweep()
+        self.eth.mine(self.eth.sent[0], logs=[self.transfer_log(self.addr, self.hot.address, 990)])
+        self.assertEqual(self.sweep(start_new=False)['confirmed'], 1)
+        s = Sweep.objects.get()
+        self.assertEqual((int(s.amount), int(s.transaction_log.amount)), (990, 990))
+        self.assertIn('moved 990', s.error_message)
+
+    def test_open_sweep_on_another_chain_does_not_block_this_one(self):
+        other = Blockchain.objects.create(name='Other', chain_id=5, coin=self.eth_coin)
+        other_native = CoinInfo.objects.create(blockchain=other, coin=self.eth_coin, decimal=18)
+        Sweep.objects.create(blockchain=other, coin_info=other_native, crypto_address=self.address, to_address=COLD)
+        self.deposit(self.native, ETH)
+        self.assertEqual(self.sweep()['created'], 1)
+
     def test_no_top_up_when_address_already_has_gas(self):
         self.deposit(self.usdt, 1_000)
         self.eth.balances[self.addr] = 10 ** 9
@@ -313,14 +386,19 @@ class ScannerIgnoresPlatformWalletsTest(SweepTestBase):
         from .tests import FakeEth as ScannerEth, FakeWeb3 as ScannerWeb3
 
         top_up = {'hash': '0x' + '77' * 32, 'from': self.hot.address, 'to': self.address.address, 'value': 5 * 10 ** 15}
-        real = {'hash': '0x' + '88' * 32, 'from': '0x' + '33' * 20, 'to': self.address.address, 'value': 10 ** 16}
-        eth = ScannerEth(latest=200, blocks={150: [top_up, real]},
-                         receipts={top_up['hash']: {'status': 1}, real['hash']: {'status': 1}})
+        # Another user's withdrawal, paid by the hot wallet to this deposit address, is a real deposit.
+        withdrawal = {'hash': '0x' + '88' * 32, 'from': self.hot.address, 'to': self.address.address, 'value': 10 ** 16}
+        TransactionLog.objects.create(tx_id=top_up['hash'], blockchain=self.chain, coin_info=self.native,
+                                      direction=TransactionLog.Direction.GAS_TOPUP, sender_address=self.hot.address,
+                                      recipient_address=self.addr, amount=top_up['value'])
+        eth = ScannerEth(latest=200, blocks={150: [top_up, withdrawal]},
+                         receipts={top_up['hash']: {'status': 1}, withdrawal['hash']: {'status': 1}})
         Blockchain.objects.filter(pk=self.chain.pk).update(last_block=149)
         self.chain.refresh_from_db()
         self.chain.scan_batch_size = 10
         self.assertEqual(ChainScanner(self.chain, w3=ScannerWeb3(eth)).run(), 1)
-        self.assertEqual(list(TransactionLog.objects.filter(direction='deposit').values_list('tx_id', flat=True)), [real['hash']])
+        self.assertEqual(list(TransactionLog.objects.filter(direction='deposit').values_list('tx_id', flat=True)),
+                         [withdrawal['hash']])
 
 
 class SweepTaskTest(SweepTestBase):

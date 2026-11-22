@@ -81,6 +81,9 @@ def _run_sweeps(blockchain, start_new: bool):
     except BroadcastError as e:
         logger.warning('%s: sweeping aborted: %s', blockchain, e)
         return str(e)
+    except Exception as e:  # e.g. an RPC timeout: do not take the other chains (or withdrawals) down with it
+        logger.exception('%s: sweeping failed: %s', blockchain, e)
+        return f'error: {e}'
 
 
 @shared_task(name='blockchain.sweep_deposits', soft_time_limit=TASK_TIME_LIMIT)

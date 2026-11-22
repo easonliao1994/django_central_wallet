@@ -328,6 +328,7 @@ class Sweep(models.Model):
     topup_broadcast_at = models.DateTimeField(null=True, blank=True)
     topup_count = models.PositiveSmallIntegerField(default=0)
     topup_log = models.ForeignKey(TransactionLog, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    send_attempts = models.PositiveSmallIntegerField(default=0, help_text='Failed attempts to sign/send (e.g. gas estimation errors); cancelled after too many.')
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -335,11 +336,11 @@ class Sweep(models.Model):
     class Meta:
         ordering = ['-id']
         constraints = [
-            # One sweep at a time per address: they share the address nonce and its native balance.
+            # One sweep at a time per address and chain: they share the address nonce and its native balance.
             models.UniqueConstraint(
-                fields=['crypto_address'],
+                fields=['blockchain', 'crypto_address'],
                 condition=Q(status__in=['pending', 'topping_up', 'broadcast']),
-                name='one_open_sweep_per_address',
+                name='one_open_sweep_per_chain_address',
             ),
         ]
 

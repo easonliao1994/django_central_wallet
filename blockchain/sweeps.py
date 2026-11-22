@@ -46,7 +46,10 @@ logger = logging.getLogger(__name__)
 
 BALANCE_OF_SELECTOR = '70a08231'  # balanceOf(address)
 TOPUP_GAS_PRICE_BUFFER = 2  # top up enough native coin for twice the current gas price
+SIGN_GAS_HEADROOM = Decimal('1.5')  # token sweeps need gas for 1.5x the price, so one rebroadcast bump fits
 MAX_TOPUPS = 3  # per sweep, in case gas prices keep rising
+MAX_SEND_ATTEMPTS = 10  # failed sign/send attempts before a pending sweep is cancelled
+RETRY_COOLDOWN = timedelta(hours=6)  # wait before sweeping an address/coin again after a failure or cancel
 NEW_SWEEPS_PER_RUN = 20
 
 # Fields of each leg on the Sweep model.
@@ -96,9 +99,12 @@ def _send(w3, s: Sweep, signed) -> bool:
 # --------------------------------------------------------------------------- candidates
 def sweep_destination(blockchain: Blockchain, coin_info: CoinInfo, hot: HotWallet, w3) -> str:
     """Hot wallet, or the cold wallet once the hot wallet holds at least hot_wallet_limit."""
+    from web3 import Web3
     cold = (blockchain.cold_wallet_address or '').strip()
     if cold and coin_info.hot_wallet_limit and coin_info.hot_wallet_limit > 0:
-        if coin_balance(w3, coin_info, hot.address) >= int(coin_info.hot_wallet_limit):
+        if not Web3.isAddress(cold):
+            logger.error('%s: cold_wallet_address %r is not a valid address; sweeping to the hot wallet', blockchain, cold)
+        elif coin_balance(w3, coin_info, hot.address) >= int(coin_info.hot_wallet_limit):
             return _checksum(cold)
     return _checksum(hot.address)
 
@@ -114,18 +120,30 @@ def find_candidates(blockchain: Blockchain, w3) -> List[Tuple[CryptoAddress, Coi
 
     coin_infos = list(CoinInfo.objects.filter(blockchain=blockchain, coin__isnull=False, sweep_threshold__gt=0))
     coin_infos.sort(key=lambda ci: 0 if ci.contract else 1)
-    busy = set(Sweep.objects.filter(status__in=Sweep.OPEN_STATUSES).values_list('crypto_address_id', flat=True))
+    busy = set(Sweep.objects.filter(blockchain=blockchain, status__in=Sweep.OPEN_STATUSES)
+               .values_list('crypto_address_id', flat=True))
+    cooling_down = set(Sweep.objects.filter(
+        blockchain=blockchain, status__in=[Sweep.Status.FAILED, Sweep.Status.CANCELLED],
+        updated_at__gte=timezone.now() - RETRY_COOLDOWN).values_list('crypto_address_id', 'coin_info_id'))
     addresses = {a.address.lower(): a for a in CryptoAddress.objects.all()}
+    # A native sweep pays its own gas: only worth it if the threshold is left after the fee.
+    native_fee = math.ceil(Decimal(blockchain.gas_limit) * GAS_ESTIMATE_MARGIN) * int(w3.eth.gas_price)
 
     result = []
     for coin_info in coin_infos:
         threshold = int(coin_info.sweep_threshold)
+        fee = 0 if coin_info.contract else native_fee
         for address, expected in sorted(expected_balances(blockchain, coin_info).items()):
             crypto_address = addresses.get(address)
-            if crypto_address is None or crypto_address.pk in busy or expected < threshold:
+            if crypto_address is None or crypto_address.pk in busy or expected - fee < threshold \
+                    or (crypto_address.pk, coin_info.pk) in cooling_down:
                 continue
-            balance = coin_balance(w3, coin_info, crypto_address.address)
-            if balance >= threshold:
+            try:
+                balance = coin_balance(w3, coin_info, crypto_address.address)
+            except Exception as e:
+                logger.warning('%s: balance of %s %s unavailable, skipped: %s', blockchain, coin_info, address, e)
+                continue
+            if balance - fee >= threshold:
                 result.append((crypto_address, coin_info, balance))
                 busy.add(crypto_address.pk)
     return result
@@ -163,8 +181,14 @@ def _send_topup(s: Sweep, w3, hot: HotWallet, amount: int) -> bool:
         if s.status != Sweep.Status.PENDING:
             return False
         hot = HotWallet.objects.select_for_update().get(pk=hot.pk)
-        nonce = max(int(w3.eth.get_transaction_count(_checksum(hot.address), 'pending')), hot.next_nonce)
         gas_price = int(w3.eth.gas_price)
+        # Never reserve a hot wallet nonce for a top-up that cannot be paid: a rejected
+        # transaction would leave a nonce gap that blocks every later withdrawal.
+        available = int(w3.eth.get_balance(_checksum(hot.address), 'pending'))
+        if available < int(amount) + gas * gas_price:
+            raise ValueError(f'Hot wallet has {available} wei pending balance, needs {int(amount) + gas * gas_price} '
+                             f'for the gas top-up')
+        nonce = max(int(w3.eth.get_transaction_count(_checksum(hot.address), 'pending')), hot.next_nonce)
         signed = _sign({'nonce': nonce, 'gasPrice': gas_price, 'chainId': bc.chain_id, 'gas': gas, **call},
                        hot.get_private_key())
         tx_id = signed.hash.hex().lower()
@@ -203,7 +227,8 @@ def _send_sweep(s: Sweep, w3, hot: HotWallet) -> str:
             return 'cancelled'
         call = _token_call(coin_info, s.to_address, amount)
         gas = _estimate(w3, address, call, bc.gas_limit_erc20)
-        if native_balance < gas * gas_price:
+        # Keep headroom so a rebroadcast with a bumped gas price can still be paid.
+        if native_balance < math.ceil(gas * gas_price * SIGN_GAS_HEADROOM):
             if s.topup_count >= MAX_TOPUPS:
                 Sweep.objects.filter(pk=s.pk).update(status=Sweep.Status.FAILED,
                                                      error_message=f'Still not enough gas after {MAX_TOPUPS} top-ups')
@@ -249,9 +274,18 @@ def send_pending(blockchain: Blockchain, w3, hot: HotWallet) -> Dict[str, int]:
         except BroadcastError:
             raise
         except Exception as e:
-            # e.g. gas estimation failed: nothing signed, keep it pending and retry next run.
-            logger.warning('Sweep #%s: not sent, will retry: %s', s.pk, e)
-            Sweep.objects.filter(pk=s.pk).update(error_message=f'Not sent: {e}'[:2000])
+            # e.g. gas estimation failed: nothing signed, keep it pending and retry next run,
+            # but give up after a while so the address is not blocked forever.
+            attempts = s.send_attempts + 1
+            if attempts >= MAX_SEND_ATTEMPTS:
+                logger.error('Sweep #%s: cancelled after %s failed attempts: %s', s.pk, attempts, e)
+                Sweep.objects.filter(pk=s.pk, status=Sweep.Status.PENDING).update(
+                    status=Sweep.Status.CANCELLED, send_attempts=attempts,
+                    error_message=f'Cancelled after {attempts} failed attempts: {e}'[:2000])
+                result['cancelled'] += 1
+            else:
+                logger.warning('Sweep #%s: not sent, will retry: %s', s.pk, e)
+                Sweep.objects.filter(pk=s.pk).update(send_attempts=attempts, error_message=f'Not sent: {e}'[:2000])
             continue
         if outcome == 'sent':
             result['sent'] += 1
@@ -277,9 +311,16 @@ def _rebroadcast(s: Sweep, leg: str, w3, hot: HotWallet) -> bool:
     if leg == 'topup':
         call = {'to': _checksum(s.crypto_address.address), 'value': int(s.topup_amount)}
         key = hot.get_private_key()
+        if int(w3.eth.get_balance(_checksum(hot.address), 'pending')) < call['value'] + gas * gas_price:
+            Sweep.objects.filter(pk=s.pk).update(error_message='Hot wallet cannot pay the top-up rebroadcast; fund it')
+            return False
     elif s.coin_info.contract:
         call = _token_call(s.coin_info, s.to_address, int(s.amount))
         key = s.crypto_address.get_private_key()
+        if int(w3.eth.get_balance(_checksum(s.crypto_address.address))) < gas * gas_price:
+            Sweep.objects.filter(pk=s.pk).update(
+                error_message='Not enough gas on the address to rebroadcast at a higher price; waiting')
+            return False
     else:
         # The pending transaction was not mined, so the balance is unchanged; pay the new fee from it.
         amount = int(w3.eth.get_balance(_checksum(s.crypto_address.address))) - gas * gas_price
@@ -311,17 +352,19 @@ def _rebroadcast(s: Sweep, leg: str, w3, hot: HotWallet) -> bool:
 
 
 # --------------------------------------------------------------------------- confirmation
-def _token_sweep_happened(s: Sweep, receipt) -> bool:
+def _token_amount_swept(s: Sweep, receipt) -> Optional[int]:
+    """Total the token contract reports moving from the deposit address to the destination,
+    or None if it emitted no such Transfer (some tokens return false instead of reverting)."""
     contract = s.coin_info.contract.lower()
+    total = None
     for log in receipt.get('logs') or []:
         topics = log.get('topics') or []
         if str(log.get('address', '')).lower() != contract or len(topics) != 3 or _to_hex(topics[0]) != TRANSFER_TOPIC:
             continue
         if _topic_to_address(topics[1]) == s.crypto_address.address.lower() \
-                and _topic_to_address(topics[2]) == s.to_address.lower() \
-                and _to_int(log.get('data') or 0) == int(s.amount):
-            return True
-    return False
+                and _topic_to_address(topics[2]) == s.to_address.lower():
+            total = (total or 0) + _to_int(log.get('data') or 0)
+    return total
 
 
 def _fee(w3, mined_hash: str, receipt) -> Tuple[int, dict]:
@@ -342,66 +385,87 @@ def check_sweeps(blockchain: Blockchain, w3, hot: Optional[HotWallet], stuck_aft
 
     for s in Sweep.objects.filter(blockchain=blockchain, status__in=[Sweep.Status.TOPPING_UP, Sweep.Status.BROADCAST]) \
             .select_related('coin_info', 'crypto_address', 'blockchain'):
-        leg = 'topup' if s.status == Sweep.Status.TOPPING_UP else 'sweep'
-        p = LEG_PREFIX[leg]
-        hashes = [getattr(s, p + 'tx_id')] + list(getattr(s, p + 'previous_tx_ids') or [])
-        mined_hash, receipt = _find_receipt(w3, hashes)
-
-        if receipt is None:
-            broadcast_at = getattr(s, p + 'broadcast_at')
-            if broadcast_at and broadcast_at < timezone.now() - stuck_after and hot is not None:
-                sender = hot.address if leg == 'topup' else s.crypto_address.address
-                final_nonce = int(w3.eth.get_transaction_count(_checksum(sender), safe_block))
-                if final_nonce > int(getattr(s, p + 'nonce')) and _find_receipt(w3, hashes)[1] is None:
-                    # Only our own transactions use these nonces, so this should not happen; stop and flag it.
-                    Sweep.objects.filter(pk=s.pk, status=s.status).update(
-                        status=Sweep.Status.FAILED, error_message=f'{leg} nonce was used by another transaction')
-                    result['failed'] += 1
-                else:
-                    result['rebroadcast'] += int(_rebroadcast(s, leg, w3, hot))
-            continue
-
-        block_number = int(receipt['blockNumber'])
-        if block_number > safe_block:
-            continue
-        fee, tx = _fee(w3, mined_hash, receipt)
-        succeeded = int(receipt['status']) == 1
-
-        with transaction.atomic():
-            locked = Sweep.objects.select_for_update().get(pk=s.pk)
-            if locked.status != s.status:
-                continue
-            setattr(locked, p + 'tx_id', mined_hash)
-            log_id = locked.topup_log_id if leg == 'topup' else locked.transaction_log_id
-            moved = int(tx['value'])
-            if leg == 'topup':
-                TransactionLog.objects.filter(pk=log_id).update(
-                    tx_id=mined_hash, block_number=block_number, fee=fee, amount=moved,
-                    status=TransactionLog.Status.CONFIRMED if succeeded else TransactionLog.Status.FAILED)
-                if succeeded:
-                    locked.status = Sweep.Status.PENDING  # signed on this run's send pass
-                    result['topped_up'] += 1
-                else:
-                    locked.status, locked.error_message = Sweep.Status.FAILED, 'Gas top-up reverted on chain'
-                    result['failed'] += 1
-            else:
-                if succeeded and s.coin_info.contract and not _token_sweep_happened(locked, receipt):
-                    succeeded = False
-                    locked.error_message = 'Token contract did not emit the expected Transfer event'
-                amount = int(locked.amount) if s.coin_info.contract else moved
-                TransactionLog.objects.filter(pk=log_id).update(
-                    tx_id=mined_hash, block_number=block_number, fee=fee, amount=amount,
-                    status=TransactionLog.Status.CONFIRMED if succeeded else TransactionLog.Status.FAILED)
-                locked.amount = amount
-                if succeeded:
-                    locked.status = Sweep.Status.CONFIRMED
-                    result['confirmed'] += 1
-                else:
-                    locked.status = Sweep.Status.FAILED
-                    locked.error_message = locked.error_message or 'Sweep reverted on chain'
-                    result['failed'] += 1
-            locked.save()
+        try:
+            _check_one(s, w3, hot, safe_block, stuck_after, result)
+        except Exception as e:
+            logger.exception('Sweep #%s: check failed, will retry: %s', s.pk, e)
     return result
+
+
+def _check_one(s: Sweep, w3, hot: Optional[HotWallet], safe_block: int, stuck_after: timedelta, result: dict):
+    """Finalise or rebroadcast one in-flight sweep leg."""
+    leg = 'topup' if s.status == Sweep.Status.TOPPING_UP else 'sweep'
+    p = LEG_PREFIX[leg]
+    hashes = [getattr(s, p + 'tx_id')] + list(getattr(s, p + 'previous_tx_ids') or [])
+    mined_hash, receipt = _find_receipt(w3, hashes)
+
+    if receipt is None:
+        broadcast_at = getattr(s, p + 'broadcast_at')
+        if broadcast_at and broadcast_at < timezone.now() - stuck_after and hot is not None:
+            sender = hot.address if leg == 'topup' else s.crypto_address.address
+            final_nonce = int(w3.eth.get_transaction_count(_checksum(sender), safe_block))
+            if final_nonce > int(getattr(s, p + 'nonce')) and _find_receipt(w3, hashes)[1] is None:
+                # Only our own transactions use these nonces, so this should not happen; stop and flag it
+                # for an admin (the reconciliation report shows whether anything actually moved).
+                with transaction.atomic():
+                    if Sweep.objects.filter(pk=s.pk, status=s.status).update(
+                            status=Sweep.Status.FAILED,
+                            error_message=f'{leg} nonce was used by a transaction we do not know; check the explorer'):
+                        log_id = s.topup_log_id if leg == 'topup' else s.transaction_log_id
+                        TransactionLog.objects.filter(pk=log_id).update(status=TransactionLog.Status.FAILED)
+                result['failed'] += 1
+            else:
+                result['rebroadcast'] += int(_rebroadcast(s, leg, w3, hot))
+        return
+
+    block_number = int(receipt['blockNumber'])
+    if block_number > safe_block:
+        return
+    fee, tx = _fee(w3, mined_hash, receipt)
+    succeeded = int(receipt['status']) == 1
+
+    with transaction.atomic():
+        locked = Sweep.objects.select_for_update().get(pk=s.pk)
+        if locked.status != s.status:
+            return
+        setattr(locked, p + 'tx_id', mined_hash)
+        log_id = locked.topup_log_id if leg == 'topup' else locked.transaction_log_id
+        moved = int(tx['value'])
+        if leg == 'topup':
+            TransactionLog.objects.filter(pk=log_id).update(
+                tx_id=mined_hash, block_number=block_number, fee=fee, amount=moved,
+                status=TransactionLog.Status.CONFIRMED if succeeded else TransactionLog.Status.FAILED)
+            if succeeded:
+                locked.status = Sweep.Status.PENDING  # signed on this run's send pass
+                result['topped_up'] += 1
+            else:
+                locked.status, locked.error_message = Sweep.Status.FAILED, 'Gas top-up reverted on chain'
+                result['failed'] += 1
+        else:
+            amount = moved
+            if s.coin_info.contract:
+                amount = int(locked.amount)
+                if succeeded:
+                    swept = _token_amount_swept(locked, receipt)
+                    if swept is None:
+                        succeeded = False
+                        locked.error_message = 'Token contract did not emit the expected Transfer event'
+                    elif swept != amount:
+                        # e.g. fee-on-transfer tokens: record what actually moved and flag it.
+                        locked.error_message = f'Transfer event moved {swept}, not the {amount} sent; check the token'
+                        amount = swept
+            TransactionLog.objects.filter(pk=log_id).update(
+                tx_id=mined_hash, block_number=block_number, fee=fee, amount=amount,
+                status=TransactionLog.Status.CONFIRMED if succeeded else TransactionLog.Status.FAILED)
+            locked.amount = amount
+            if succeeded:
+                locked.status = Sweep.Status.CONFIRMED
+                result['confirmed'] += 1
+            else:
+                locked.status = Sweep.Status.FAILED
+                locked.error_message = locked.error_message or 'Sweep reverted on chain'
+                result['failed'] += 1
+        locked.save()
 
 
 # --------------------------------------------------------------------------- entry point
