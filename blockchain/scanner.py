@@ -169,7 +169,22 @@ class ChainScanner:
         deposits = self._collect_token_deposits(start, end, addresses)
         if self.blockchain.scan_native:
             deposits += self._collect_native_deposits(start, end, addresses)
-        return deposits
+        # Gas top-ups sent by the hot wallet before a token sweep are not user deposits.
+        # Match them by transaction hash, not by sender: a user's withdrawal paid by the hot
+        # wallet to another user's deposit address is a real deposit for that user.
+        top_ups = self._gas_top_up_hashes() if deposits else set()
+        return [d for d in deposits
+                if not (d.log_index == TransactionLog.NATIVE_LOG_INDEX and d.tx_id.lower() in top_ups)]
+
+    def _gas_top_up_hashes(self) -> set:
+        from .models import Sweep
+        hashes = set(TransactionLog.objects.filter(blockchain=self.blockchain, direction=TransactionLog.Direction.GAS_TOPUP)
+                     .exclude(tx_id=None).values_list('tx_id', flat=True))
+        for tx_id, previous in Sweep.objects.filter(blockchain=self.blockchain).exclude(topup_tx_id=None) \
+                .values_list('topup_tx_id', 'topup_previous_tx_ids'):
+            hashes.add(tx_id)
+            hashes.update(previous or [])
+        return {h.lower() for h in hashes}
 
     def _get_logs(self, start: int, end: int, contracts: List[str]) -> list:
         """eth_getLogs, halving the range when the provider rejects it."""

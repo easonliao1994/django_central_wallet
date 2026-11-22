@@ -206,6 +206,11 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'blockchain.dispatch_chain_jobs',
         'schedule': 60.0,
     },
+    # Looks for deposit addresses above their coin's sweep_threshold and starts sweeps.
+    'sweep-deposits': {
+        'task': 'blockchain.sweep_deposits',
+        'schedule': 600.0,
+    },
     'reconcile-balances': {
         'task': 'blockchain.reconcile_balances',
         'schedule': crontab(hour=3, minute=0),

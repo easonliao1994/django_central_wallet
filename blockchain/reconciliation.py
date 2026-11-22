@@ -2,17 +2,18 @@
 
 The scanner cannot see everything (e.g. native coin sent from inside a contract),
 and RPC providers occasionally miss data. This check reports, per address and
-coin, the difference between the on-chain balance and the expected balance
-(confirmed deposits minus confirmed sweeps). It never credits anything by itself;
-mismatches are surfaced to admins to investigate.
+coin, the difference between the on-chain balance and the expected balance. It
+never credits anything by itself; mismatches are surfaced to admins to investigate.
 
-Note: native coin balances also drop by the gas paid when sweeping tokens, so a
-small negative difference on the native coin is expected once sweeps exist.
+Expected balance of a deposit address, per coin:
+    confirmed deposits + confirmed gas top-ups received
+    - confirmed sweeps sent
+    - (native coin only) gas fees paid by the address for mined transactions
 """
 import logging
+from collections import defaultdict
 from dataclasses import dataclass
-from decimal import Decimal
-from typing import List
+from typing import Dict, List
 
 from django.db.models import Sum
 
@@ -35,39 +36,43 @@ class Discrepancy:
         return self.on_chain - self.expected
 
 
-def _expected_balance(blockchain, coin_info, address: str) -> int:
-    def total(**filters):
-        value = TransactionLog.objects.filter(
-            blockchain=blockchain, coin_info=coin_info,
-            status=TransactionLog.Status.CONFIRMED, **filters,
-        ).aggregate(s=Sum('amount'))['s']
-        return int(value or Decimal(0))
+def _sum_by(qs, address_field: str, value_field: str = 'amount') -> Dict[str, int]:
+    rows = qs.values(address_field).annotate(total=Sum(value_field))
+    return {r[address_field].lower(): int(r['total'] or 0) for r in rows if r[address_field]}
 
-    deposits = total(direction=TransactionLog.Direction.DEPOSIT, recipient_address__iexact=address)
-    sweeps = total(direction=TransactionLog.Direction.SWEEP, sender_address__iexact=address)
-    return deposits - sweeps
+
+def expected_balances(blockchain: Blockchain, coin_info: CoinInfo) -> Dict[str, int]:
+    """Expected on-chain balance per address (lowercase) according to the transaction log."""
+    D = TransactionLog.Direction
+    confirmed = TransactionLog.objects.filter(blockchain=blockchain, coin_info=coin_info,
+                                              status=TransactionLog.Status.CONFIRMED)
+    balances = defaultdict(int)
+    for address, value in _sum_by(confirmed.filter(direction__in=[D.DEPOSIT, D.GAS_TOPUP]), 'recipient_address').items():
+        balances[address] += value
+    for address, value in _sum_by(confirmed.filter(direction=D.SWEEP), 'sender_address').items():
+        balances[address] -= value
+    if not coin_info.contract:
+        # Gas is paid in the native coin, for token transfers too, and also by reverted transactions.
+        mined = TransactionLog.objects.filter(blockchain=blockchain, block_number__isnull=False, fee__gt=0)
+        for address, value in _sum_by(mined, 'sender_address', 'fee').items():
+            balances[address] -= value
+    return dict(balances)
 
 
 def find_discrepancies(blockchain: Blockchain, w3=None) -> List[Discrepancy]:
-    from web3 import Web3
-
-    from django_central_wallet.utils.global_method import get_erc20_contract
+    from .sweeps import coin_balance
 
     w3 = w3 or blockchain.get_web3(middleware_inject=True)
     if w3 is None:
         raise ScanError(f'No reachable RPC endpoint for {blockchain}')
 
     coin_infos = list(CoinInfo.objects.filter(blockchain=blockchain, coin__isnull=False).select_related('coin'))
+    expected_by_coin = {ci.pk: expected_balances(blockchain, ci) for ci in coin_infos}
     result = []
     for crypto_address in CryptoAddress.objects.all():
-        checksum = Web3.toChecksumAddress(crypto_address.address)
         for coin_info in coin_infos:
-            if coin_info.contract:
-                contract = get_erc20_contract(w3, Web3.toChecksumAddress(coin_info.contract))
-                on_chain = int(contract.functions.balanceOf(checksum).call())
-            else:
-                on_chain = int(w3.eth.get_balance(checksum))
-            expected = _expected_balance(blockchain, coin_info, crypto_address.address)
+            on_chain = coin_balance(w3, coin_info, crypto_address.address)
+            expected = expected_by_coin[coin_info.pk].get(crypto_address.address.lower(), 0)
             if on_chain != expected:
                 d = Discrepancy(crypto_address.address, coin_info.pk, coin_info.coin.symbol, on_chain, expected)
                 logger.warning('%s: balance mismatch %s %s on-chain=%s expected=%s',

@@ -119,7 +119,24 @@ class BlockchainAdmin(admin.ModelAdmin):
                     f'{b}: {d.address} {d.symbol} on-chain={d.on_chain} expected={d.expected} (diff {d.difference})',
                     level=messages.WARNING)
 
-    actions = [update_latest_block_number, scan_now, rescan_block, reconcile_balances]
+    @admin.display(description='Sweep deposit addresses now for selected blockchains')
+    def sweep_now(modeladmin, request, queryset):
+        from .locks import single_run_lock
+        from .sweeps import process_chain_sweeps
+        from .tasks import LOCK_TIMEOUT
+        from .withdrawals import BroadcastError
+        for b in queryset:
+            with single_run_lock(f'withdrawals:{b.pk}', LOCK_TIMEOUT) as acquired:
+                if not acquired:
+                    modeladmin.message_user(request, f'{b}: withdrawals/sweeps are being processed, try again shortly.',
+                                            level=messages.WARNING)
+                    continue
+                try:
+                    modeladmin.message_user(request, f'{b}: {process_chain_sweeps(b, start_new=True)}')
+                except BroadcastError as e:
+                    modeladmin.message_user(request, f'{b}: {e}', level=messages.ERROR)
+
+    actions = [update_latest_block_number, scan_now, rescan_block, reconcile_balances, sweep_now]
 
 # Register your models here.
 admin.site.register(Coin)
@@ -212,3 +229,18 @@ class WithdrawalAdmin(admin.ModelAdmin):
                 modeladmin.message_user(request, f'{chain}: {e}', level=messages.ERROR)
 
     actions = [approve_selected, reject_selected, broadcast_selected, rebroadcast_selected, check_selected]
+
+
+@admin.register(Sweep)
+class SweepAdmin(admin.ModelAdmin):
+    """Read-only: sweeps are created and advanced by the background jobs."""
+    list_display = ('id', 'blockchain', 'coin_info', 'crypto_address', 'amount', 'to_address', 'status', 'topup_count', 'tx_id', 'created_at')
+    list_filter = ('status', 'blockchain')
+    search_fields = ('crypto_address__address', 'to_address', 'tx_id', 'topup_tx_id')
+    readonly_fields = [f.name for f in Sweep._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

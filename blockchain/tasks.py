@@ -5,7 +5,7 @@ import time
 from celery import shared_task
 
 from .locks import single_run_lock
-from .models import Blockchain, Withdrawal
+from .models import Blockchain, CoinInfo, Sweep, Withdrawal
 
 logger = logging.getLogger(__name__)
 
@@ -17,13 +17,15 @@ SCAN_TIME_BUDGET = 45  # seconds a scan run may keep catching up before yielding
 
 @shared_task(name='blockchain.dispatch_chain_jobs')
 def dispatch_chain_jobs():
-    """Fan out per-chain jobs: scanning for auto-sync chains, withdrawals where any are open."""
+    """Fan out per-chain jobs: scanning for auto-sync chains; withdrawals and in-flight sweeps
+    wherever any are open."""
     for pk in Blockchain.objects.filter(is_auto_sync=True).values_list('pk', flat=True):
         scan_chain.delay(pk)
     open_statuses = [Withdrawal.Status.APPROVED, Withdrawal.Status.BROADCAST, Withdrawal.Status.STUCK]
-    chain_ids = Withdrawal.objects.filter(status__in=open_statuses) \
-        .values_list('coin_info__blockchain_id', flat=True).distinct()
-    for pk in chain_ids:
+    chain_ids = set(Withdrawal.objects.filter(status__in=open_statuses)
+                    .values_list('coin_info__blockchain_id', flat=True).distinct())
+    chain_ids |= set(Sweep.objects.filter(status__in=Sweep.OPEN_STATUSES).values_list('blockchain_id', flat=True).distinct())
+    for pk in sorted(chain_ids):
         process_withdrawals.delay(pk)
 
 
@@ -62,10 +64,41 @@ def process_withdrawals(blockchain_id: int):
         blockchain = Blockchain.objects.get(pk=blockchain_id)
         try:
             # Confirm / finalise, rebroadcast stuck ones (same nonce), then send approved ones.
-            return process_chain_withdrawals(blockchain)
+            result = process_chain_withdrawals(blockchain)
         except BroadcastError as e:
             logger.warning('%s: withdrawal processing aborted: %s', blockchain, e)
-            return str(e)
+            result = str(e)
+        # Advance in-flight sweeps under the same lock (gas top-ups use the hot wallet nonce).
+        return {'withdrawals': result, 'sweeps': _run_sweeps(blockchain, start_new=False)}
+
+
+def _run_sweeps(blockchain, start_new: bool):
+    from .sweeps import process_chain_sweeps
+    from .withdrawals import BroadcastError
+
+    try:
+        return process_chain_sweeps(blockchain, start_new=start_new)
+    except BroadcastError as e:
+        logger.warning('%s: sweeping aborted: %s', blockchain, e)
+        return str(e)
+    except Exception as e:  # e.g. an RPC timeout: do not take the other chains (or withdrawals) down with it
+        logger.exception('%s: sweeping failed: %s', blockchain, e)
+        return f'error: {e}'
+
+
+@shared_task(name='blockchain.sweep_deposits', soft_time_limit=TASK_TIME_LIMIT)
+def sweep_deposits():
+    """Look for deposit addresses to sweep on every auto-sync chain that has a coin with a sweep threshold."""
+    chain_ids = CoinInfo.objects.filter(sweep_threshold__gt=0, blockchain__is_auto_sync=True) \
+        .values_list('blockchain_id', flat=True).distinct()
+    results = {}
+    for pk in sorted(set(chain_ids)):
+        with single_run_lock(f'withdrawals:{pk}', LOCK_TIMEOUT) as acquired:
+            if not acquired:
+                results[pk] = 'skipped: already running'
+                continue
+            results[pk] = _run_sweeps(Blockchain.objects.get(pk=pk), start_new=True)
+    return results
 
 
 @shared_task(name='blockchain.reconcile_balances', soft_time_limit=3600)

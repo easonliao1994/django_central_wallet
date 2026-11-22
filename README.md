@@ -67,6 +67,7 @@ The same jobs can be run once by hand (useful for debugging):
 python manage.py scan_chain [--chain <id>] [--rescan-block <number>]
 python manage.py process_withdrawals --chain <id> [--check-only]
 python manage.py reconcile_balances --chain <id>
+python manage.py sweep_deposits --chain <id> [--dry-run]
 python manage.py rotate_wallet_keys
 ```
 
@@ -75,6 +76,7 @@ python manage.py rotate_wallet_keys
 1. In the admin, add a `Coin` for the native coin and each token, then a `Blockchain` (RPC URLs one per line, `chain_id`, `confirm_times`) and a `CoinInfo` per coin on that chain (`contract` empty for the native coin).
 2. Tick `is_auto_sync` to let the scanner pick the chain up. A new chain starts scanning from the current confirmed block.
 3. For withdrawals, add a `HotWallet` for the chain (the key is generated and encrypted automatically), fund its address, and set the withdrawal limits on each `CoinInfo`. By default every withdrawal needs admin approval.
+4. To sweep deposits into the hot wallet, set `sweep_threshold` on each `CoinInfo` (0 = never sweep). Optionally set the chain's `cold_wallet_address` and a coin's `hot_wallet_limit`: once the hot wallet holds that much, sweeps go to the cold wallet instead. Keep some native coin in the hot wallet: it pays the gas top-ups for token sweeps.
 
 Example for the Sepolia testnet: RPC URLs `https://ethereum-sepolia-rpc.publicnode.com` and `https://sepolia.gateway.tenderly.co`, `chain_id` 11155111, explorer `https://sepolia.etherscan.io`. Use an RPC provider whose `eth_getLogs` accepts at least `scan_batch_size` blocks (some public endpoints limit it to 50).
 
@@ -82,7 +84,8 @@ Example for the Sepolia testnet: RPC URLs `https://ethereum-sepolia-rpc.publicno
 
 - **Deposits**: ERC20 deposits are detected from `Transfer` event logs (`eth_getLogs`), so reverted transfers are never credited and `transferFrom`/multisend deposits are included. Native coin deposits are found by reading blocks and are credited only when the receipt status is 1. Only blocks with `confirm_times` confirmations (or the `finalized` tag) are processed, and a unique constraint on `(blockchain, tx_id, log_index)` makes rescans safe.
 - **Withdrawals**: the balance is debited when requested; approved withdrawals are signed by the chain's hot wallet and confirmed by polling the transaction receipt. The gas limit is estimated per withdrawal (`eth_estimateGas` + 20%, never below the chain's `gas_limit`), because a fixed 21000 is not enough everywhere: on Sepolia, sending ETH to a never-used address costs about 207k gas. A withdrawal keeps its nonce once signed, so it can be paid at most once even when the RPC node returns errors; stuck ones are rebroadcast with the same nonce. Reverted withdrawals, and ones rejected before signing, are refunded.
-- **Reconciliation**: a daily job compares on-chain balances with recorded deposits and sweeps and logs mismatches.
+- **Sweeps**: every 10 minutes, deposit addresses holding at least a coin's `sweep_threshold` are swept to the hot wallet (or the cold wallet once the hot wallet is above `hot_wallet_limit`). Native coin is swept minus the gas fee. A token sweep needs native coin for gas, so if the address has none the hot wallet first sends a gas top-up, and the sweep is signed once that is mined. Both transactions keep their nonce and are rebroadcast with the same nonce if they get stuck. A top-up is only sent when the hot wallet can pay it, so it never leaves a nonce gap that would block withdrawals. Gas top-ups are recognised by transaction hash and never credited as deposits, and sweeps never change users' platform balances. Not supported yet: chains with an extra L1 data fee (OP-stack L2s), since the native sweep amount does not account for it.
+- **Reconciliation**: a daily job compares each deposit address's on-chain balance with the transaction log (deposits + gas top-ups received - sweeps - gas fees paid) and logs mismatches.
 
 ## Features
 
@@ -90,7 +93,7 @@ Example for the Sepolia testnet: RPC URLs `https://ethereum-sepolia-rpc.publicno
 - [x] Support user deposits, including ERC20 tokens.
 - [x] Support user withdrawals, including ERC20 tokens.
 - [ ] Internal transfers between users.
-- [ ] Sweep deposits to the hot wallet.
+- [x] Sweep deposits to the hot wallet (with gas top-ups and an optional cold wallet).
 
 ## Contributing
 
