@@ -1,6 +1,5 @@
 from django.shortcuts import render
 from rest_framework import viewsets, permissions, status, generics, mixins
-from django_auto_prefetching import AutoPrefetchViewSetMixin
 from django.contrib.auth import get_user_model
 from django_central_wallet.utils.paginations import CustomPagination
 from .serializers import *
@@ -15,15 +14,12 @@ class IsAdminOrReadOnly(permissions.BasePermission):
         return request.method in permissions.SAFE_METHODS or request.user.is_staff
 
 
-class BlockchainViewSet(AutoPrefetchViewSetMixin, viewsets.ModelViewSet):
-    queryset = Blockchain.objects.all()
+class BlockchainViewSet(viewsets.ModelViewSet):
+    queryset = Blockchain.objects.order_by('id')  # stable pagination
     serializer_class = BlockchainSerializer
     permission_classes = [IsAdminOrReadOnly]
     pagination_class = CustomPagination
-    
-    def get_queryset(self):
-        return super().get_queryset()
-    
+
 
 class BlockchainDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = BlockchainSerializer
@@ -50,7 +46,7 @@ class DepositAddressView(generics.RetrieveAPIView):
         return get_or_create_deposit_address(self.request.user)
 
 
-class WithdrawalViewSet(AutoPrefetchViewSetMixin, mixins.CreateModelMixin, mixins.ListModelMixin,
+class WithdrawalViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
                         mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     """Create and track withdrawals. Users only see their own."""
     serializer_class = WithdrawalSerializer
@@ -189,7 +185,7 @@ class BalanceListView(generics.GenericAPIView):
         return Response(BalanceSerializer(rows, many=True).data)
 
 
-class TransactionViewSet(AutoPrefetchViewSetMixin, mixins.ListModelMixin, mixins.RetrieveModelMixin,
+class TransactionViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin,
                          viewsets.GenericViewSet):
     """My deposits, withdrawals and internal transfers, newest first.
 
@@ -248,7 +244,7 @@ class TransactionViewSet(AutoPrefetchViewSetMixin, mixins.ListModelMixin, mixins
         return qs
 
 
-class InternalTransferViewSet(AutoPrefetchViewSetMixin, mixins.CreateModelMixin, mixins.ListModelMixin,
+class InternalTransferViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
                               mixins.RetrieveModelMixin, viewsets.GenericViewSet):
     """Send coins to another user off-chain (by email or platform address), and list transfers I sent or received."""
     serializer_class = InternalTransferSerializer

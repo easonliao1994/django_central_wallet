@@ -7,11 +7,10 @@ from .models import *
 from .serializers import *
 from .tokens import EmailVerifyTokenGenerator
 from django.contrib.auth import get_user_model
-from django_auto_prefetching import AutoPrefetchViewSetMixin
 from django_central_wallet.utils.paginations import CustomPagination
 # Create your views here.
 
-class UserViewSet(AutoPrefetchViewSetMixin, viewsets.ModelViewSet):
+class UserViewSet(viewsets.ModelViewSet):
     queryset = get_user_model().objects.all()
     serializer_class = UserSerializer
     permission_classes = [permissions.IsAuthenticated]

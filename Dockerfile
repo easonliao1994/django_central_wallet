@@ -1,5 +1,5 @@
-# Django 4.1 supports Python up to 3.11.
-FROM python:3.11-slim
+# Django 5.2 LTS supports Python 3.10 to 3.13.
+FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
