@@ -18,6 +18,8 @@ The user web app is on port 8080 (`FRONTEND_PORT`); the Django app (API, admin a
 
 Logs: `docker compose logs -f worker beat web`. One-off commands: `docker compose exec web python manage.py <command>`.
 
+`docker compose ps` shows each service's health: web calls `GET /health/`, the worker answers `celery inspect ping` for its own node, and beat must have touched its heartbeat file within the last 6 minutes. Beat starts once the worker is healthy. Docker only reports health; it does not restart unhealthy containers by itself.
+
 ## Frontend
 
 `frontend/` is a React + TypeScript single-page app (Vite) for users: sign up and log in (with the 2FA step), balances, deposit address with QR code, withdrawals, transfers, transaction history, 2FA setup, saved withdrawal addresses, whitelist mode, profile and password. The interface is in Traditional Chinese (default) and English, follows the system light/dark theme, and works on phones.
@@ -48,6 +50,7 @@ Edit `.env`:
 - `REDIS_URL`: Redis for Celery and task locks (default `redis://localhost:6379/0`)
 - `POSTGRES_HOST` / `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD`: PostgreSQL. With `POSTGRES_HOST` empty, SQLite is used.
 - `DEBUG`, `ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`
+- `ADMINS`, `ALERT_WEBHOOK_URL` and the other `ALERT_*` settings: where alerts go (see [Alerts and health checks](#alerts-and-health-checks))
 
 Then run `python manage.py migrate`.
 
@@ -113,6 +116,30 @@ python manage.py sweep_deposits --chain <id> [--dry-run]
 python manage.py rotate_wallet_keys
 ```
 
+### Alerts and health checks
+
+Problems are reported to operators by email to `ADMINS` and/or a webhook (`blockchain/alerts.py`), and every alert is also logged at ERROR level:
+
+| Alert | When |
+|---|---|
+| Balance mismatch | The daily reconciliation finds a deposit address whose on-chain balance differs from the transaction log |
+| Hot wallet low | The hot wallet holds less of a coin than its `hot_wallet_alert_threshold` (set per `CoinInfo` in the admin, smallest unit, 0 = off), or less than the withdrawals of that coin pending review or approved |
+| Withdrawal not confirmed | Approved more than `ALERT_STUCK_MINUTES` ago (default 30) and still waiting to broadcast, broadcast or stuck. Counted from approval, so rebroadcasts do not reset it |
+| Withdrawal failed | Reverted on chain (and refunded) |
+| Sweep / gas top-up not confirmed | A sweep open longer than `ALERT_STUCK_MINUTES`, twice that when it needed a gas top-up |
+| Sweep / gas top-up failed | Failed, or cancelled after repeated send errors |
+| Scanner lag | The deposit scanner is more than `ALERT_SCAN_LAG_BLOCKS` (default 100) behind the confirmed head |
+| RPC unreachable | None of a chain's RPC URLs answers (auto-sync chains and chains with a hot wallet) |
+| Task failed | Any Celery task raises an unhandled exception (including time limits) |
+
+Reconciliation alerts come from the daily job and task failures from the worker as they happen; the other checks run every 5 minutes (`blockchain.run_monitoring_checks`, `blockchain/monitoring.py`). They only read the database and the chain.
+
+- **Channels**: `ADMINS` (comma separated emails; needs SMTP, see `EMAIL_HOST`; sent from `SERVER_EMAIL`) and `ALERT_WEBHOOK_URL`, which receives `POST {"text": "..."}`: a Slack incoming webhook, a Discord webhook with `/slack` appended, or any receiver that accepts that JSON (10 second timeout, `ALERT_WEBHOOK_TIMEOUT`). Treat the webhook URL as a secret; it is never logged. URLs are removed from alert texts, so RPC API keys in error messages do not end up in chat. Setting `ADMINS` also turns on Django's emails for server errors (HTTP 500) when `DEBUG=False`.
+- **De-duplication**: the same alert (same chain, coin, withdrawal, sweep or task + error) is sent at most once per `ALERT_DEDUP_SECONDS` (default 3600) while the problem lasts. Each failure is reported once. Failures older than 3 days are not reported, so a first deploy does not report old ones.
+- **Never in the way**: an alert that cannot be sent (SMTP down, webhook timeout) is logged, and the job that raised it carries on.
+
+`GET /health/` (no authentication) checks the database (`SELECT 1`) and Redis (`PING` on `REDIS_URL`) and answers `200 {"status": "ok", "checks": {"database": "ok", "redis": "ok"}}`, or `503` with `"status": "failing"` and the failing component. Nothing else is disclosed. It is answered by the first middleware, before the `ALLOWED_HOSTS` check and any HTTPS redirect, so container and load balancer probes can use `http://<ip>:8000/health/` with production settings. Failing probes are not reported as server errors, so they do not trigger error emails.
+
 ### Setting up a chain
 
 1. In the admin, add a `Coin` for the native coin and each token, then a `Blockchain` (RPC URLs one per line, `chain_id`, `confirm_times`) and a `CoinInfo` per coin on that chain (`contract` empty for the native coin).
@@ -140,6 +167,7 @@ Example for the Sepolia testnet: RPC URLs `https://ethereum-sepolia-rpc.publicno
                                               (+ in-flight sweeps) blockchain/sweeps.py
    sweep_deposits (every 10 minutes) -------> start new sweeps     blockchain/sweeps.py
    reconcile_balances (daily) --------------> compare with chain   blockchain/reconciliation.py
+   run_monitoring_checks (every 5 minutes) -> alerts (email / webhook)  blockchain/monitoring.py, alerts.py
                          |
                          v
               EVM chain via JSON-RPC (web3.py 7): deposits in, withdrawals and sweeps out
@@ -148,7 +176,7 @@ Example for the Sepolia testnet: RPC URLs `https://ethereum-sepolia-rpc.publicno
 - **Balances** live in the database: `external_amount` changes with on-chain deposits and withdrawals, `internal_amount` with off-chain transfers. User funds sit on per-user deposit addresses until swept to the hot wallet, which pays withdrawals.
 - **Keys**: user deposit keys and hot wallet keys are encrypted at rest with `WALLET_ENCRYPTION_KEYS` (`blockchain/key_vault.py`); the cold wallet key is never stored.
 - **Per-chain lock**: withdrawals, gas top-ups and sweeps of a chain run under one Redis lock, because they share the hot wallet nonce.
-- **Code map**: `blockchain/scanner.py` (deposits), `withdrawals.py`, `sweeps.py`, `transfers.py`, `reconciliation.py`, `tasks.py` (Celery), `wallet.py` (addresses and balances), `management/commands/` (manual runs).
+- **Code map**: `blockchain/scanner.py` (deposits), `withdrawals.py`, `sweeps.py`, `transfers.py`, `reconciliation.py`, `monitoring.py` + `alerts.py` (operator alerts), `tasks.py` (Celery), `wallet.py` (addresses and balances), `management/commands/` (manual runs); `django_central_wallet/health.py` (`/health/`), `beat.py` (beat heartbeat).
 
 ## How it works
 
@@ -156,7 +184,7 @@ Example for the Sepolia testnet: RPC URLs `https://ethereum-sepolia-rpc.publicno
 - **Withdrawals**: the balance is debited when requested; approved withdrawals are signed by the chain's hot wallet and confirmed by polling the transaction receipt. The gas limit is estimated per withdrawal (`eth_estimateGas` + 20%, never below the chain's `gas_limit`), because a fixed 21000 is not enough everywhere: on Sepolia, sending ETH to a never-used address costs about 207k gas. A withdrawal keeps its nonce once signed, so it can be paid at most once even when the RPC node returns errors; stuck ones are rebroadcast with the same nonce. Reverted withdrawals, and ones rejected before signing, are refunded.
 - **Sweeps**: every 10 minutes, deposit addresses holding at least a coin's `sweep_threshold` are swept to the hot wallet (or the cold wallet once the hot wallet is above `hot_wallet_limit`). Native coin is swept minus the gas fee. A token sweep needs native coin for gas, so if the address has none the hot wallet first sends a gas top-up, and the sweep is signed once that is mined. Both transactions keep their nonce and are rebroadcast with the same nonce if they get stuck. A top-up is only sent when the hot wallet can pay it, so it never leaves a nonce gap that would block withdrawals. Gas top-ups are recognised by transaction hash and never credited as deposits, and sweeps never change users' platform balances. Not supported yet: chains with an extra L1 data fee (OP-stack L2s), since the native sweep amount does not account for it.
 - **Internal transfers**: off-chain; only `CoinInfoBalance.internal_amount` changes (the sender's may go negative, the checked figure is `internal + external`). The balance rows involved are locked in primary-key order in one transaction, so balances cannot be overdrawn by concurrent requests, and both users get a `TransactionLog` (`direction=internal`, with an `in`/`out` `flow`).
-- **Reconciliation**: a daily job compares each deposit address's on-chain balance with the transaction log (deposits + gas top-ups received - sweeps - gas fees paid) and logs mismatches.
+- **Reconciliation**: a daily job compares each deposit address's on-chain balance with the transaction log (deposits + gas top-ups received - sweeps - gas fees paid), logs mismatches and alerts the admins.
 
 ## Features
 

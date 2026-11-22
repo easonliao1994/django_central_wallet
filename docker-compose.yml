@@ -6,6 +6,7 @@
 # Services: PostgreSQL, Redis, a one-shot migration job, the web app (gunicorn),
 # a Celery worker, Celery Beat (scheduler) and the frontend (nginx serving the React app and
 # proxying the API on the same origin). The web and frontend ports are published.
+# Every long-running service has a healthcheck: `docker compose ps` shows (healthy) / (unhealthy).
 
 x-app: &app
   # Built once by the "web" service; the other app services reuse the same image.
@@ -63,6 +64,15 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    healthcheck:
+      # GET /health/ (database + Redis). It is answered by the first middleware, before the
+      # ALLOWED_HOSTS check and the HTTPS redirect, so 127.0.0.1 works with production settings.
+      # urlopen raises on a 503, so the exit code is non-zero when unhealthy.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/', timeout=10)"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
 
   worker:
     <<: *app
@@ -70,6 +80,14 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    healthcheck:
+      # Ping this container's own worker node (default name celery@<container hostname>) through
+      # the broker, so it fails when the worker is hung or cannot reach Redis.
+      test: ["CMD-SHELL", "celery -A django_central_wallet inspect ping --destination celery@$$HOSTNAME --timeout 10"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
 
   beat:
     <<: *app
@@ -77,6 +95,16 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      # Start scheduling once a worker consumes the queue, so jobs do not pile up in Redis.
+      worker:
+        condition: service_healthy
+    healthcheck:
+      # The beat scheduler touches a heartbeat file on every tick (django_central_wallet/beat.py).
+      test: ["CMD", "python", "-m", "django_central_wallet.beat"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
 
   frontend:
     build: ./frontend
@@ -85,7 +113,8 @@ services:
     ports:
       - "${FRONTEND_PORT:-8080}:8080"
     depends_on:
-      - web
+      web:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
       interval: 30s

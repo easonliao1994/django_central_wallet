@@ -6,4 +6,4 @@ class BlockchainConfig(AppConfig):
     name = 'blockchain'
 
     def ready(self):
-        from . import signals  # noqa: F401
+        from . import monitoring, signals  # noqa: F401  (monitoring: Celery task_failure alerts)
