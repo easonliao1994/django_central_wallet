@@ -70,8 +70,11 @@ from django_central_wallet.utils.custom_exception_handler import (
 )
 
 
+from .throttles import EmailRateThrottle
+
+
 class AuthThrottleMixin:
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [ScopedRateThrottle, EmailRateThrottle]
     throttle_scope = 'auth'
 
 
@@ -91,7 +94,10 @@ class LoginView(AuthThrottleMixin, generics.GenericAPIView):
         serializer.is_valid(raise_exception=True)
         email, password = serializer.validated_data['email'], serializer.validated_data['password']
         user = get_user_model().objects.filter(email__iexact=email).first()
-        if user is None or not user.check_password(password):
+        if user is None:
+            get_user_model()().set_password(password)  # same hashing cost, so timing does not reveal accounts
+            raise InvalidCredentialsException()
+        if not user.check_password(password):
             raise InvalidCredentialsException()
         if not user.is_active:
             # Only reachable with the right password, so this does not reveal which emails exist.
@@ -106,10 +112,12 @@ class LogoutView(generics.GenericAPIView):
     serializer_class = None
 
     def post(self, request):
+        from django.contrib.auth import logout
         if isinstance(request.auth, Token):
             request.auth.delete()
-        else:
+        else:  # session login: end the session and revoke API tokens too
             Token.objects.filter(user=request.user).delete()
+            logout(request)
         return Response({'success': True})
 
 
@@ -122,9 +130,10 @@ class ResendVerificationView(AuthThrottleMixin, generics.GenericAPIView):
     def post(self, request):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        from .tasks import send_verification_email
         user = get_user_model().objects.filter(email__iexact=serializer.validated_data['email']).first()
         if user is not None and not user.is_verified:
-            user.send_verification_mail(_request_domain(request))
+            send_verification_email.delay(user.pk, _request_domain(request))
         return Response({'success': True})
 
 
@@ -137,9 +146,10 @@ class ForgotPasswordView(AuthThrottleMixin, generics.GenericAPIView):
     def post(self, request):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        from .tasks import send_password_reset_email
         user = get_user_model().objects.filter(email__iexact=serializer.validated_data['email']).first()
         if user is not None and user.is_active and user.has_usable_password():
-            user.send_password_reset_mail(_request_domain(request))
+            send_password_reset_email.delay(user.pk, _request_domain(request))
         return Response({'success': True})
 
 
@@ -184,6 +194,8 @@ class ChangePasswordView(generics.GenericAPIView):
     """Change my password. Other sessions are signed out; the response carries a new token."""
     serializer_class = PasswordChangeSerializer
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]  # the old-password check must not allow guessing
+    throttle_scope = 'auth'
 
     def post(self, request):
         serializer = self.get_serializer(data=request.data)

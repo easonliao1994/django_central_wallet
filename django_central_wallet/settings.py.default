@@ -175,8 +175,12 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 2,
     # Login, verification and password emails are throttled per client IP.
     'DEFAULT_THROTTLE_RATES': {
-        'auth': os.getenv('AUTH_THROTTLE_RATE', '20/hour'),
+        'auth': os.getenv('AUTH_THROTTLE_RATE', '20/hour'),  # per client IP
+        'auth_email': os.getenv('AUTH_EMAIL_THROTTLE_RATE', '10/hour'),  # per target email
     },
+    # Number of trusted reverse proxies in front of the app. 0 = use the connecting IP and ignore
+    # X-Forwarded-For (which clients can forge); set 1 behind one proxy / load balancer.
+    'NUM_PROXIES': int(os.getenv('NUM_PROXIES', '0')),
 }
 
 # Email: SMTP when EMAIL_HOST is set, otherwise printed to the console (development).
@@ -218,6 +222,8 @@ CACHES = {
 if len(sys.argv) > 1 and sys.argv[1] == 'test':
     # Tests need no Redis: throttles and task locks use an in-process cache.
     CACHES = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}
+    CELERY_TASK_ALWAYS_EAGER = True  # emails are sent inline in tests
+    SITE_URL = SITE_URL or 'http://testserver'
 
 # Celery
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', REDIS_URL)

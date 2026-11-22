@@ -1,5 +1,6 @@
 import uuid
 from django.db import models
+from django.db.models.functions import Lower
 from django.contrib.auth.models import AbstractUser, PermissionsMixin
 from .manager import UserManager
 from django.conf import settings
@@ -13,6 +14,9 @@ def site_url(path: str, domain: str = None) -> str:
     development fallback (it comes from the Host header, so it must not be trusted in production)."""
     base = getattr(settings, 'SITE_URL', '')
     if not base:
+        if not settings.DEBUG:
+            from django.core.exceptions import ImproperlyConfigured
+            raise ImproperlyConfigured('Set SITE_URL: emailed links must not be built from the request Host header')
         base = ('https://' if settings.HAS_HTTPS else 'http://') + (domain or 'localhost')
     return base.rstrip('/') + path
 
@@ -26,6 +30,11 @@ class User(AbstractUser, PermissionsMixin):
     created_at = models.DateTimeField(auto_now_add=True)
 
     objects = UserManager()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(Lower('email'), name='unique_user_email_case_insensitive'),
+        ]
 
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = []

@@ -65,7 +65,7 @@ Visit `http://localhost:8000/admin` for the admin site and `http://localhost:800
 | `GET /blockchain/transactions/` | My deposits, withdrawals and internal transfers, newest first, paginated (`page`, `page_size`). Filters: `blockchain`, `coin_info`, `symbol`, `direction` (comma separated), `status`, `created_after`, `created_before` (ISO date or datetime) |
 | `GET/POST /blockchain/withdrawals/` | Request and track withdrawals |
 
-Login, verification and password emails are throttled per IP (`AUTH_THROTTLE_RATE`, default `20/hour`), and they answer the same way whether or not an account exists. Set `SITE_URL` in production: links in emails are built from it rather than from the request's Host header. Configure SMTP with `EMAIL_HOST` and friends (see `.env.default`).
+Login, verification and password emails are throttled per IP (`AUTH_THROTTLE_RATE`, default `20/hour`) and per target email (`AUTH_EMAIL_THROTTLE_RATE`, `10/hour`); behind a reverse proxy set `NUM_PROXIES=1` so the real client IP is used. These endpoints answer the same way whether or not an account exists, and emails are sent by the Celery worker. Set `SITE_URL` in production: links in emails are built from it rather than from the request's Host header. Configure SMTP with `EMAIL_HOST` and friends (see `.env.default`).
 
 Users only see their own data. Superusers can add `user=<id>`, or `user=all` (platform totals for balances; every record, including sweeps and gas top-ups, for transactions).
 

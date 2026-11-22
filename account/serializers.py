@@ -50,9 +50,12 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             is_active=False
         )
 
+        from django.db import transaction
+
+        from .tasks import send_verification_email
         request = self.context.get('request')
-        current_site_url = self.get_current_site_url(request)
-        user.send_verification_mail(current_site_url)
+        domain = self.get_current_site_url(request)
+        transaction.on_commit(lambda: send_verification_email.delay(user.pk, domain))
         return user
 
 class UserSerializer(serializers.ModelSerializer):

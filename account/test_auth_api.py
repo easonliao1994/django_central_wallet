@@ -81,8 +81,9 @@ class AuthApiTest(APITestCase):
 
     @override_settings(ALLOWED_HOSTS=['*'])  # even if ALLOWED_HOSTS is misconfigured
     def test_links_use_site_url_not_the_request_host(self):
-        self.client.post('/account/register/', {'email': 'bob@test.com', 'password': PASSWORD, 'first_name': 'B',
-                                                'last_name': 'B'}, format='json', HTTP_HOST='evil.example.com')
+        with self.captureOnCommitCallbacks(execute=True):  # the email is queued after the commit
+            self.client.post('/account/register/', {'email': 'bob@test.com', 'password': PASSWORD, 'first_name': 'B',
+                                                    'last_name': 'B'}, format='json', HTTP_HOST='evil.example.com')
         self.assertIn('https://wallet.example.com/account/activate/', mail.outbox[0].body)
         self.assertNotIn('evil.example.com', mail.outbox[0].body)
 
@@ -150,6 +151,69 @@ class AuthApiTest(APITestCase):
         self.assertNotEqual(data['token'], token)
         self.assertFalse(Token.objects.filter(key=token).exists())
         self.assertEqual(self.login(password='N3w-Passphrase!')['token'], data['token'])
+
+
+@override_settings(WALLET_ENCRYPTION_KEYS=[TEST_WALLET_KEY])
+class AuthHardeningTest(APITestCase):
+    def setUp(self):
+        cache.clear()
+
+    def test_verification_token_cannot_be_reused_for_another_user(self):
+        """User 57's token re-split as user 5's '5' + '7<timestamp>' must not verify user 5."""
+        from django.utils.http import int_to_base36
+
+        from account.tokens import EmailVerifyTokenGenerator
+        gen = EmailVerifyTokenGenerator()
+        victim = User.objects.create_user(email='victim@test.com', password=PASSWORD, is_active=False)
+        attacker = User.objects.create_user(email='attacker@test.com', password=PASSWORD, is_active=False)
+        User.objects.filter(pk=attacker.pk).update(id=int(f'{victim.pk}7'))
+        attacker = User.objects.get(email='attacker@test.com')
+        ts_b36, hash_part = gen.make_token(attacker).split('-')
+        from django.utils.http import base36_to_int
+        forged = f"{int_to_base36(int('7' + str(base36_to_int(ts_b36))))}-{hash_part}"
+        self.assertFalse(gen.check_token(victim, forged))
+        # and verification tokens are not password reset tokens
+        from django.contrib.auth.tokens import default_token_generator
+        self.assertFalse(default_token_generator.check_token(victim, gen.make_token(victim)))
+
+    def test_emails_differing_only_in_case_are_one_account(self):
+        from django.db import IntegrityError, transaction
+        User.objects.create_user(email='Case@test.com', password=PASSWORD)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            User.objects.create_user(email='case@test.com', password=PASSWORD)
+
+    @override_settings(REST_FRAMEWORK={
+        'EXCEPTION_HANDLER': 'django_central_wallet.utils.custom_exception_handler.custom_exception_handler',
+        'DEFAULT_THROTTLE_RATES': {'auth': '100/hour', 'auth_email': '3/hour'}, 'NUM_PROXIES': 0,
+    })
+    def test_per_email_throttle_survives_ip_rotation(self):
+        from rest_framework.settings import api_settings
+        from rest_framework.throttling import ScopedRateThrottle
+
+        from account.throttles import EmailRateThrottle
+        EmailRateThrottle.THROTTLE_RATES = ScopedRateThrottle.THROTTLE_RATES = api_settings.DEFAULT_THROTTLE_RATES
+        try:
+            User.objects.create_user(email='t@test.com', password=PASSWORD, is_active=True)
+            results = [self.client.post('/account/login/', {'email': 't@test.com', 'password': 'x'}, format='json',
+                                        HTTP_X_FORWARDED_FOR=f'10.0.0.{i}').json()['error'] for i in range(4)]
+            self.assertEqual(results, ['invalid_credentials'] * 3 + ['throttled'])
+        finally:
+            EmailRateThrottle.THROTTLE_RATES = ScopedRateThrottle.THROTTLE_RATES = api_settings.DEFAULT_THROTTLE_RATES
+
+    @override_settings(SITE_URL='', DEBUG=False)
+    def test_links_refuse_the_host_header_in_production(self):
+        from django.core.exceptions import ImproperlyConfigured
+
+        from account.models import site_url
+        with self.assertRaises(ImproperlyConfigured):
+            site_url('/account/activate/x/y/', 'evil.example.com')
+
+    def test_session_logout_ends_the_session(self):
+        user = User.objects.create_user(email='s@test.com', password=PASSWORD, is_active=True)
+        self.client.force_login(user)
+        self.assertEqual(self.client.get('/account/me/').json()['email'], 's@test.com')
+        self.client.post('/account/logout/')
+        self.assertEqual(self.client.get('/account/me/').json()['success'], False)
 
 
 class BlockchainApiPermissionTest(APITestCase):
