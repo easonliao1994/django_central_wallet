@@ -5,6 +5,7 @@ import pyqrcode as pyqrcode
 from django.conf import settings
 from django.db import models
 from django.db.models import Q
+from web3 import HTTPProvider, Web3
 
 from django_central_wallet.utils.global_method import *
 
