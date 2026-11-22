@@ -109,6 +109,8 @@ class TransactionSerializer(serializers.ModelSerializer):
     tx_url = serializers.SerializerMethodField()
     withdrawal = serializers.SerializerMethodField()
     withdrawal_status = serializers.SerializerMethodField()
+    flow = serializers.SerializerMethodField(help_text="'in' or 'out' for the user the record belongs to; null for platform records.")
+    internal_transfer = serializers.SerializerMethodField()
 
     def get_amount_raw(self, obj) -> str:
         return str(int(obj.amount))
@@ -133,9 +135,73 @@ class TransactionSerializer(serializers.ModelSerializer):
         w = self._withdrawal(obj)
         return w.status if w else None
 
+    def _transfer(self, obj):
+        for name in ('transfer_as_sender', 'transfer_as_recipient'):
+            try:
+                return name, getattr(obj, name)
+            except InternalTransfer.DoesNotExist:
+                continue
+        return None, None
+
+    def get_flow(self, obj):
+        D = TransactionLog.Direction
+        if obj.direction == D.DEPOSIT:
+            return 'in'
+        if obj.direction == D.WITHDRAWAL:
+            return 'out'
+        if obj.direction == D.INTERNAL:
+            side, t = self._transfer(obj)
+            return None if t is None else ('out' if side == 'transfer_as_sender' else 'in')
+        return None
+
+    def get_internal_transfer(self, obj):
+        _, t = self._transfer(obj)
+        return t.pk if t else None
+
     class Meta:
         model = TransactionLog
-        fields = ['id', 'user', 'direction', 'status', 'blockchain_id', 'blockchain', 'coin_info', 'symbol',
+        fields = ['id', 'user', 'direction', 'flow', 'status', 'blockchain_id', 'blockchain', 'coin_info', 'symbol',
                   'amount', 'amount_raw', 'from_address', 'to_address', 'tx_id', 'tx_url', 'block_number',
-                  'withdrawal', 'withdrawal_status', 'created_at']
+                  'withdrawal', 'withdrawal_status', 'internal_transfer', 'created_at']
         read_only_fields = fields
+
+
+class InternalTransferSerializer(serializers.ModelSerializer):
+    blockchain = serializers.CharField(source='coin_info.blockchain.name', read_only=True)
+    symbol = serializers.CharField(source='coin_info.coin.symbol', read_only=True)
+    amount = serializers.CharField(source='amount_str', read_only=True)
+    from_address = serializers.CharField(source='sender_address', read_only=True)
+    to_address = serializers.CharField(source='recipient_address', read_only=True)
+    flow = serializers.SerializerMethodField(help_text="'out' if I sent it, 'in' if I received it.")
+    type = serializers.SerializerMethodField(help_text="Always 'internal_transfer' (lets clients tell it apart from a withdrawal).")
+
+    def get_flow(self, obj):
+        request = self.context.get('request')
+        return 'out' if request is not None and obj.sender_id == request.user.pk else 'in'
+
+    def get_type(self, obj):
+        return 'internal_transfer'
+
+    class Meta:
+        model = InternalTransfer
+        fields = ['id', 'type', 'flow', 'blockchain', 'symbol', 'coin_info', 'amount', 'from_address', 'to_address',
+                  'memo', 'created_at']
+        read_only_fields = fields
+
+
+class InternalTransferCreateSerializer(serializers.Serializer):
+    coin_info = serializers.PrimaryKeyRelatedField(queryset=CoinInfo.objects.select_related('blockchain', 'coin'),
+                                                   help_text='CoinInfo id (chain + coin) to transfer.')
+    to = serializers.CharField(max_length=256, help_text="Recipient's email or platform deposit address.")
+    amount = serializers.CharField(max_length=64, help_text="Human readable amount, e.g. '1.5'.")
+    memo = serializers.CharField(max_length=140, required=False, allow_blank=True, default='')
+
+    def create(self, validated_data):
+        from .transfers import transfer
+        from .withdrawals import parse_amount
+        coin_info = validated_data['coin_info']
+        return transfer(self.context['request'].user, coin_info, validated_data['to'],
+                        parse_amount(coin_info, validated_data['amount']), validated_data.get('memo', ''))
+
+    def to_representation(self, instance):
+        return InternalTransferSerializer(instance, context=self.context).data

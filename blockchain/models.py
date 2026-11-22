@@ -346,3 +346,27 @@ class Sweep(models.Model):
 
     def __str__(self):
         return f'Sweep #{self.pk} {self.coin_info} {self.crypto_address.address} -> {self.to_address} ({self.status})'
+
+
+class InternalTransfer(models.Model):
+    """Off-chain transfer between two users (see blockchain/transfers.py)."""
+    sender = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='sent_transfers')
+    recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='received_transfers')
+    coin_info = models.ForeignKey(CoinInfo, on_delete=models.PROTECT)
+    amount = models.DecimalField(max_digits=30, decimal_places=0, help_text='Amount in the smallest on-chain unit.')
+    sender_address = models.CharField(max_length=64, help_text="Sender's deposit address whose balance was debited.")
+    recipient_address = models.CharField(max_length=64, help_text="Recipient's deposit address whose balance was credited.")
+    memo = models.CharField(max_length=140, blank=True, default='')
+    sender_log = models.OneToOneField(TransactionLog, on_delete=models.SET_NULL, null=True, blank=True, related_name='transfer_as_sender')
+    recipient_log = models.OneToOneField(TransactionLog, on_delete=models.SET_NULL, null=True, blank=True, related_name='transfer_as_recipient')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-id']
+
+    def __str__(self):
+        return f'Transfer #{self.pk} {self.amount_str} {self.coin_info} {self.sender} -> {self.recipient}'
+
+    @property
+    def amount_str(self):
+        return get_blockchain_real_amount(self.coin_info, self.amount)

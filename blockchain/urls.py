@@ -1,12 +1,13 @@
 from django.urls import path, include
 from rest_framework.routers import SimpleRouter, DefaultRouter
 from .views import (BalanceListView, BlockchainDetailView, BlockchainViewSet, DepositAddressView,
-                    TransactionViewSet, WithdrawalViewSet)
+                    InternalTransferViewSet, TransactionViewSet, WithdrawalViewSet)
 
 router = DefaultRouter()
 # Register fixed prefixes before '' so the blockchain '<pk>/' pattern does not swallow them.
 router.register('withdrawals', WithdrawalViewSet, basename='withdrawals')
 router.register('transactions', TransactionViewSet, basename='transactions')
+router.register('transfers', InternalTransferViewSet, basename='transfers')
 router.register('', BlockchainViewSet, basename='blockchains')
 
 # Fixed paths must come before the router's '<pk>/' pattern.
