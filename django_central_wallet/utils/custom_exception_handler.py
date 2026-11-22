@@ -6,6 +6,8 @@ def custom_exception_handler(exc, context):
     response = exception_handler(exc, context)
     
     if response is not None:
+        if not isinstance(response.data, dict):  # e.g. ValidationError(['...']) carries a list
+            response.data = {'errors': response.data}
         response.status_code = 200
         print(response.data)
         response.data['success'] = False
@@ -58,3 +60,15 @@ class WithdrawalNotAllowedException(CustomException):
 
 class InvalidFilterException(CustomException):
     default_detail = ErrorDetail('invalid_filter', 'invalid_filter')
+
+class InvalidCredentialsException(CustomException):
+    default_detail = ErrorDetail('invalid_credentials', 'invalid_credentials')
+
+class EmailNotVerifiedException(CustomException):
+    default_detail = ErrorDetail('email_not_verified', 'email_not_verified')
+
+class AccountDisabledException(CustomException):
+    default_detail = ErrorDetail('account_disabled', 'account_disabled')
+
+class InvalidTokenException(CustomException):
+    default_detail = ErrorDetail('invalid_token', 'invalid_token')
