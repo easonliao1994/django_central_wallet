@@ -16,3 +16,11 @@ def send_password_reset_email(user_id: int, domain: str = None):
     user = get_user_model().objects.filter(pk=user_id, is_active=True).first()
     if user is not None and user.has_usable_password():
         user.send_password_reset_mail(domain)
+
+
+@shared_task(name='account.send_security_notice')
+def send_security_notice(user_id: int, subject: str, lines: list):
+    """Security-relevant events: 2FA changes, password reset, new withdrawal addresses, funds sent."""
+    user = get_user_model().objects.filter(pk=user_id).first()
+    if user is not None:
+        user.send_security_notice(subject, lines)

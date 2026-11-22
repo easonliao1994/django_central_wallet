@@ -10,7 +10,8 @@ TEST_KEY = 'q2zQm1p2kqgk9b6r3XyUoJmYyq1x0n8nqQ3sV5hY6uE='
 USDC = 10 ** 6
 
 
-@override_settings(WALLET_ENCRYPTION_KEYS=[TEST_KEY])
+# These tests cover transfer logic; 2FA on outgoing funds is tested in account/test_two_factor.py.
+@override_settings(WALLET_ENCRYPTION_KEYS=[TEST_KEY], REQUIRE_2FA_FOR_WITHDRAWAL=False)
 class TransferTestBase(APITestCase):
     def setUp(self):
         self.eth = Coin.objects.create(symbol='ETH', name='Ethereum')

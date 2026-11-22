@@ -83,3 +83,27 @@ class RecipientNotFoundException(CustomException):
 
 class SelfTransferException(CustomException):
     default_detail = ErrorDetail('cannot_transfer_to_self', 'cannot_transfer_to_self')
+
+class OTPRequiredException(CustomException):
+    default_detail = ErrorDetail('otp_required', 'otp_required')
+
+class InvalidOTPException(CustomException):
+    default_detail = ErrorDetail('invalid_otp', 'invalid_otp')
+
+class TooManyOTPAttemptsException(CustomException):
+    default_detail = ErrorDetail('too_many_otp_attempts', 'too_many_otp_attempts')
+
+class TwoFactorRequiredException(CustomException):
+    default_detail = ErrorDetail('two_factor_required', 'two_factor_required')
+
+class TwoFactorAlreadyEnabledException(CustomException):
+    default_detail = ErrorDetail('two_factor_already_enabled', 'two_factor_already_enabled')
+
+class WithdrawalsLockedException(CustomException):
+    default_detail = ErrorDetail('withdrawals_locked', 'withdrawals_locked')
+
+class AddressNotWhitelistedException(CustomException):
+    default_detail = ErrorDetail('address_not_whitelisted', 'address_not_whitelisted')
+
+class AddressAlreadySavedException(CustomException):
+    default_detail = ErrorDetail('address_already_saved', 'address_already_saved')

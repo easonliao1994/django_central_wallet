@@ -453,7 +453,8 @@ class WithdrawalBroadcastTest(WithdrawalTestBase):
         self.assertEqual(wd.check_broadcast_withdrawals(self.chain, w3)['confirmed'], 1)
 
 
-@override_settings(WALLET_ENCRYPTION_KEYS=[TEST_KEY])
+# 2FA on withdrawals is tested in account/test_two_factor.py.
+@override_settings(WALLET_ENCRYPTION_KEYS=[TEST_KEY], REQUIRE_2FA_FOR_WITHDRAWAL=False)
 class WithdrawalApiTest(APITestCase):
     setUp = WithdrawalTestBase.setUp
     set_balance = WithdrawalTestBase.set_balance

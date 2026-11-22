@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Security notice</title>
+</head>
+<body>
+    <h2>Security notice</h2>
+    <p>Dear {{ email }},</p>
+    {% for line in lines %}
+    <p>{{ line }}</p>
+    {% endfor %}
+    <p>Regards,<br>Team</p>
+</body>
+</html>

@@ -59,11 +59,27 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         return user
 
 class UserSerializer(serializers.ModelSerializer):
+    two_factor_enabled = serializers.BooleanField(read_only=True)
+    withdrawal_whitelist_enabled = serializers.SerializerMethodField(
+        help_text='Whitelist mode is in force (withdrawals only to saved addresses past their cooldown).')
+    whitelist_disable_at = serializers.SerializerMethodField(
+        help_text='When a requested switch-off of whitelist mode takes effect; null if none is pending.')
+
+    def get_withdrawal_whitelist_enabled(self, obj) -> bool:
+        from .two_factor import whitelist_active
+        return whitelist_active(obj)
+
+    def get_whitelist_disable_at(self, obj):
+        from .two_factor import address_cooldown, whitelist_active
+        if obj.whitelist_disable_requested_at is None or not whitelist_active(obj):
+            return None
+        return serializers.DateTimeField().to_representation(obj.whitelist_disable_requested_at + address_cooldown())
 
     class Meta:
         model = User
-        fields = ['id', 'email', 'first_name', 'last_name', 'is_verified', 'created_at']
-        read_only_fields = ['id', 'email', 'is_verified', 'created_at']
+        fields = ['id', 'email', 'first_name', 'last_name', 'is_verified', 'created_at', 'two_factor_enabled',
+                  'withdrawal_whitelist_enabled', 'whitelist_disable_at', 'withdrawals_locked_until']
+        read_only_fields = ['id', 'email', 'is_verified', 'created_at', 'withdrawals_locked_until']
 
 
 def _validate_new_password(value, user=None):
@@ -77,6 +93,8 @@ def _validate_new_password(value, user=None):
 class LoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
     password = serializers.CharField(style={'input_type': 'password'}, trim_whitespace=False)
+    otp_code = serializers.CharField(required=False, allow_blank=True, max_length=16,
+                                     help_text='6-digit code from the authenticator app, when 2FA is on.')
 
 
 class EmailSerializer(serializers.Serializer):
@@ -92,3 +110,39 @@ class PasswordResetSerializer(serializers.Serializer):
 class PasswordChangeSerializer(serializers.Serializer):
     old_password = serializers.CharField(style={'input_type': 'password'}, trim_whitespace=False)
     new_password = serializers.CharField(style={'input_type': 'password'}, trim_whitespace=False)
+
+
+# --------------------------------------------------------------------------- 2FA and whitelist
+class PasswordConfirmSerializer(serializers.Serializer):
+    password = serializers.CharField(style={'input_type': 'password'}, trim_whitespace=False)
+
+
+class OTPCodeSerializer(serializers.Serializer):
+    otp_code = serializers.CharField(max_length=16, help_text='6-digit code from the authenticator app.')
+
+
+class TwoFactorDisableSerializer(PasswordConfirmSerializer, OTPCodeSerializer):
+    pass
+
+
+class WithdrawalAddressSerializer(serializers.ModelSerializer):
+    active = serializers.SerializerMethodField(help_text='The cooldown has passed and withdrawals may go here.')
+    otp_code = serializers.CharField(write_only=True, max_length=16, help_text='6-digit code from the authenticator app.')
+
+    def get_active(self, obj) -> bool:
+        return obj.active_from <= timezone.now()
+
+    def validate_address(self, value):
+        from blockchain.withdrawals import _checksum
+        return _checksum(value)  # raises invalid_address
+
+    class Meta:
+        model = WithdrawalAddress
+        fields = ['id', 'label', 'address', 'created_at', 'active_from', 'active', 'otp_code']
+        read_only_fields = ['id', 'created_at', 'active_from', 'active']
+
+
+class WhitelistModeSerializer(serializers.Serializer):
+    enabled = serializers.BooleanField()
+    otp_code = serializers.CharField(required=False, allow_blank=True, max_length=16,
+                                     help_text='Required to turn whitelist mode off.')

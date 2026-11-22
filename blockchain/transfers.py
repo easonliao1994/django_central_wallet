@@ -16,8 +16,9 @@ from django.db import transaction
 from django.db.models import F
 
 from django_central_wallet.utils.custom_exception_handler import (
-    DailyLimitExceededException, EmailNotVerifiedException, InsufficientBalanceException, InvalidAmountException,
-    RecipientNotFoundException, SelfTransferException, WithdrawalNotAllowedException,
+    AddressNotWhitelistedException, DailyLimitExceededException, EmailNotVerifiedException,
+    InsufficientBalanceException, InvalidAmountException, RecipientNotFoundException, SelfTransferException,
+    WithdrawalNotAllowedException,
 )
 
 from .models import CoinInfo, CoinInfoBalance, CryptoAddress, InternalTransfer, TransactionLog
@@ -56,12 +57,16 @@ def _max_balance(user, coin_info) -> int:
     return max((int(i) + int(e) for i, e in rows), default=0)
 
 
-def transfer(sender, coin_info: CoinInfo, to: str, amount: int, memo: str = '') -> InternalTransfer:
+def transfer(sender, coin_info: CoinInfo, to: str, amount: int, memo: str = '',
+             allowed_addresses: set = None) -> InternalTransfer:
     """Move ``amount`` from ``sender`` to the user identified by ``to``.
 
     Outgoing controls shared with withdrawals: the coin's ``withdrawal_enabled`` switch and the
     daily limit (withdrawals and transfers count together). Transfers are instant, so they are
     not held for review; use the daily limit to bound what a stolen session could move.
+    The 2FA code and cooldown checks run before this (``account.two_factor.authorize_outgoing``);
+    with whitelist mode on, ``allowed_addresses`` holds the sender's whitelisted addresses and the
+    recipient's deposit address must be one of them.
     """
     from .withdrawals import _today_total
 
@@ -77,6 +82,8 @@ def transfer(sender, coin_info: CoinInfo, to: str, amount: int, memo: str = '') 
     recipient, recipient_address = resolve_recipient(to)
     if recipient.pk == sender.pk:
         raise SelfTransferException()
+    if allowed_addresses is not None and recipient_address.address.lower() not in allowed_addresses:
+        raise AddressNotWhitelistedException()
     memo = (memo or '').strip()[:MAX_MEMO_LENGTH]
 
     with transaction.atomic():
