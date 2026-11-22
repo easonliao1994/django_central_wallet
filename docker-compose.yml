@@ -4,7 +4,8 @@
 #   docker compose exec web python manage.py createsuperuser
 #
 # Services: PostgreSQL, Redis, a one-shot migration job, the web app (gunicorn),
-# a Celery worker and Celery Beat (scheduler). Only the web port is published.
+# a Celery worker, Celery Beat (scheduler) and the frontend (nginx serving the React app and
+# proxying the API on the same origin). The web and frontend ports are published.
 # Every long-running service has a healthcheck: `docker compose ps` shows (healthy) / (unhealthy).
 
 x-app: &app
@@ -104,6 +105,22 @@ services:
       timeout: 15s
       retries: 3
       start_period: 60s
+
+  frontend:
+    build: ./frontend
+    image: django-central-wallet-frontend:latest
+    pull_policy: build
+    ports:
+      - "${FRONTEND_PORT:-8080}:8080"
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
 
 volumes:
   postgres-data:
