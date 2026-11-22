@@ -86,6 +86,9 @@ INSTALLED_APPS = DEFAULT_APPS + LOCAL_APPS + THIRDPARTY_APPS
 AUTH_USER_MODEL = 'account.User'
 
 MIDDLEWARE = [
+    # First: answers GET /health/ before host validation and the HTTPS redirect, so Docker and
+    # load balancer probes work whatever ALLOWED_HOSTS / SECURE_SSL_REDIRECT are (see health.py).
+    'django_central_wallet.health.HealthCheckMiddleware',
     "corsheaders.middleware.CorsMiddleware",
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
@@ -196,6 +199,20 @@ if EMAIL_HOST:
 else:
     EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@demo.com')
+# Sender of admin emails (alerts, and Django's error reports when DEBUG=False).
+SERVER_EMAIL = os.getenv('SERVER_EMAIL', DEFAULT_FROM_EMAIL)
+
+# Operator alerts (blockchain/alerts.py): emailed to ADMINS and/or posted to ALERT_WEBHOOK_URL.
+# ADMINS: comma separated email addresses. Django also emails them server errors when DEBUG=False.
+ADMINS = [(email, email) for email in env_list('ADMINS')]
+EMAIL_SUBJECT_PREFIX = os.getenv('EMAIL_SUBJECT_PREFIX', '[Central Wallet]').strip() + ' '
+# Slack-compatible incoming webhook (POST {"text": ...}); also works with Discord's /slack endpoint.
+# Treat it as a secret: it is never logged.
+ALERT_WEBHOOK_URL = os.getenv('ALERT_WEBHOOK_URL', '').strip()
+ALERT_WEBHOOK_TIMEOUT = int(os.getenv('ALERT_WEBHOOK_TIMEOUT', '10'))  # seconds
+ALERT_DEDUP_SECONDS = int(os.getenv('ALERT_DEDUP_SECONDS', '3600'))  # repeat the same alert at most this often
+ALERT_STUCK_MINUTES = int(os.getenv('ALERT_STUCK_MINUTES', '30'))  # approved/broadcast but not confirmed after this
+ALERT_SCAN_LAG_BLOCKS = int(os.getenv('ALERT_SCAN_LAG_BLOCKS', '100'))  # scanner behind the confirmed head by more
 
 
 # Internationalization
@@ -246,7 +263,14 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'blockchain.reconcile_balances',
         'schedule': crontab(hour=3, minute=0),
     },
+    # Alerts for low hot wallet funds, stuck or failed transactions, scanner lag (blockchain/monitoring.py).
+    'monitoring-checks': {
+        'task': 'blockchain.run_monitoring_checks',
+        'schedule': 300.0,
+    },
 }
+# Beat touches a heartbeat file on every tick, checked by the Docker healthcheck (django_central_wallet/beat.py).
+CELERY_BEAT_SCHEDULER = 'django_central_wallet.beat:HeartbeatScheduler'
 
 
 SWAGGER_SETTINGS = {
@@ -285,6 +309,8 @@ LOGGING = {
     'root': {'handlers': ['console'], 'level': 'WARNING'},
     'loggers': {
         'blockchain': {'handlers': ['console'], 'level': os.getenv('WALLET_LOG_LEVEL', 'INFO'), 'propagate': False},
+        # Bots probing with wrong Host headers: console only, not an email to ADMINS each time.
+        'django.security.DisallowedHost': {'handlers': ['console'], 'level': 'ERROR', 'propagate': False},
     },
 }
 

@@ -104,6 +104,7 @@ class CoinInfo(models.Model):
     auto_approve_withdrawal_limit = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Withdrawals up to this amount (smallest on-chain unit) skip admin review. 0 = every withdrawal needs review.')
     sweep_threshold = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Sweep a deposit address to the hot wallet once it holds at least this much (smallest on-chain unit). 0 = never sweep this coin.')
     hot_wallet_limit = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='When the hot wallet already holds at least this much (smallest on-chain unit), sweep to the chain\'s cold wallet instead. 0 = always sweep to the hot wallet.')
+    hot_wallet_alert_threshold = models.DecimalField(default=0, max_digits=30, decimal_places=0, help_text='Alert admins when the hot wallet holds less than this (smallest on-chain unit). 0 = off. An alert is also sent when it holds less than the withdrawals pending review or approved.')
 
     class Meta(object):
         unique_together = [('blockchain', 'coin')]

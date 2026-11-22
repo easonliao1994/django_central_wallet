@@ -103,13 +103,29 @@ def sweep_deposits():
 
 @shared_task(name='blockchain.reconcile_balances', soft_time_limit=3600)
 def reconcile_balances():
+    from .monitoring import alert_discrepancies
     from .reconciliation import find_discrepancies
     from .scanner import ScanError
 
     total = 0
     for blockchain in Blockchain.objects.filter(is_auto_sync=True):
         try:
-            total += len(find_discrepancies(blockchain))
+            found = find_discrepancies(blockchain)
         except ScanError as e:
             logger.warning('%s: reconciliation skipped: %s', blockchain, e)
+            continue
+        total += len(found)
+        alert_discrepancies(blockchain, found)
     return total
+
+
+@shared_task(name='blockchain.run_monitoring_checks', soft_time_limit=TASK_TIME_LIMIT)
+def run_monitoring_checks():
+    """Alerts for stuck/failed withdrawals and sweeps, low hot wallet funds, scanner lag, RPC outages.
+    Read-only, so it needs no per-chain lock; this lock only stops runs from overlapping."""
+    from .monitoring import run_checks
+
+    with single_run_lock('monitoring', LOCK_TIMEOUT) as acquired:
+        if not acquired:
+            return 'skipped: already running'
+        return run_checks()
